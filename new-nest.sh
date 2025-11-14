@@ -31,7 +31,7 @@ pnpm dlx @nestjs/cli generate service prisma
 mkdir -p prisma
 
 # Add prisma/generated to .gitignore
-echo "prisma/generated" >> .gitignore
+echo "**/prisma/generated" >> .gitignore
 
 # Generate BETTER_AUTH_SECRET
 if command -v openssl >/dev/null 2>&1; then
@@ -57,9 +57,10 @@ EOL
 # Create Prisma schema
 cat > prisma/schema.prisma <<EOL
 generator client {
-  provider   = "prisma-client"
-  engineType = "client"
-  output     = "./generated"
+  provider     = "prisma-client"
+  engineType   = "client"
+  moduleFormat = "commonjs"
+  output       = "../src/prisma/generated"
 }
 datasource db {
   provider = "postgresql"
@@ -70,7 +71,7 @@ EOL
 # Create Prisma instance
 cat > src/prisma/prisma.instance.ts <<EOL
 import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient } from '../../prisma/generated/client';
+import { PrismaClient } from './generated/client';
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -105,7 +106,7 @@ EOL
 # Create Prisma service
 cat > src/prisma/prisma.service.ts <<EOL
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { PrismaClient } from '../../prisma/generated/client';
+import { PrismaClient } from './generated/client';
 
 @Injectable()
 export class PrismaService
