@@ -138,8 +138,8 @@ export const auth = betterAuth({
 	}),
 
 	emailAndPassword: {
-		enabled: true, // Email/password authentication enabled
-		autoSignIn: true, // Auto sign in after registration
+		enabled: true,
+		autoSignIn: true,
 	},
 
 	plugins: [
@@ -159,7 +159,7 @@ import { auth } from '@/auth';
 export const { GET, POST } = toNextJsHandler(auth);
 EOL
 
-pnpm prisma generate
+pnpm dlx prisma generate
 
 # we need to generate the auth.ts config file first
 pnpm dlx @better-auth/cli@latest generate --yes
