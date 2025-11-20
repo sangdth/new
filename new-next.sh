@@ -29,6 +29,7 @@ pnpm add \
   ai \
   better-auth \
   date-fns \
+  dotenv \
   jotai \
   pg
 
@@ -69,11 +70,13 @@ cat > lib/prisma.ts <<EOL
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@/prisma/generated/client';
 
-if (!process.env.DATABASE_URL) {
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
 	throw new Error('DATABASE_URL environment variable is not set');
 }
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg({ connectionString });
 
 declare global {
   // We need var in declare global
@@ -92,14 +95,27 @@ EOL
 
 cat > prisma/schema.prisma <<EOL
 generator client {
-  provider   = "prisma-client"
-  engineType = "client"
-  output     = "./generated"
+  provider = "prisma-client"
+  output   = "./generated"
 }
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
+EOL
+
+cat > prisma.config.ts <<EOL
+import 'dotenv/config'
+import { defineConfig, env } from 'prisma/config'
+
+export default defineConfig({
+  schema: 'prisma/schema.prisma',
+  migrations: {
+    path: 'prisma/migrations',
+  },
+  datasource: {
+    url: env('DATABASE_URL'),
+  },
+})
 EOL
 
 # Prepare Better Auth setup
