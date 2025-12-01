@@ -38,9 +38,10 @@ pnpm dlx shadcn@latest init --defaults
 pnpm dlx shadcn@latest add --all
 
 # Create all necessary directories
-mkdir -p app/api/auth/[...all]
-mkdir -p prisma
-mkdir docker
+mkdir -p \
+  app/api/auth/[...all] \
+  prisma \
+  docker
 
 # Add prisma/generated to .gitignore
 echo "prisma/generated" >> .gitignore
