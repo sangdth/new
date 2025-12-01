@@ -40,9 +40,63 @@ pnpm dlx shadcn@latest add --all
 # Create all necessary directories
 mkdir -p app/api/auth/[...all]
 mkdir -p prisma
+mkdir docker
 
 # Add prisma/generated to .gitignore
 echo "prisma/generated" >> .gitignore
+
+# Generate docker compose file
+cat > docker/compose.dev.yml <<EOL
+name: $1
+
+services:
+  postgres:
+    container_name: $1-postgres
+    image: postgres:18-alpine
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - $1-postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready --dbname=postgres --username=postgres
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  redis:
+    container_name: $1-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - $1-redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  mailpit:
+    container_name: $1-mailpit
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  $1-postgres-data:
+  $1-redis-data:
+EOL
 
 # Generate BETTER_AUTH_SECRET
 if command -v openssl >/dev/null 2>&1; then
@@ -52,10 +106,12 @@ else
 fi
 
 cat > .env <<EOL
+
 BETTER_AUTH_TELEMETRY=0
 BETTER_AUTH_SECRET=$BETTER_AUTH_SECRET
 BETTER_AUTH_URL=http://localhost:3000
 
+POSTGRES_PASSWORD=password
 DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres
 
 # For mailpit
