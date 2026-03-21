@@ -51,13 +51,28 @@ Two convenience scripts to quickly scaffold new projects with common dependencie
 ### Next.js Project
 
 ```bash
-./new-next.sh <app-name>
+./new-next.sh [flags] <app-name>
 ```
 
-Example:
+#### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Print what would be executed without running anything |
+| `--no-prisma` | Skip Prisma, Docker, and Better Auth setup |
+| `--no-shadcn` | Skip shadcn/ui initialization and component install |
+| `-v`, `--version` | Show version |
+| `--help` | Show help message |
+
+> [!NOTE]
+> `--no-prisma` also disables Better Auth and Docker Compose, since auth depends on the Prisma adapter.
+
+#### Examples
 
 ```bash
 ./new-next.sh my-nextjs-app
+./new-next.sh --dry-run my-nextjs-app
+./new-next.sh --no-prisma --no-shadcn my-nextjs-app
 ```
 
 ### NestJS Project
@@ -128,13 +143,14 @@ pg                    # PostgreSQL client
 
 Creates necessary directories:
 
-- `api/auth/[...all]/`
+- `app/api/auth/[...all]/`
 - `prisma/`
+- `docker/`
 - `lib/`
 
 #### Step 5: Configures Environment Variables
 
-Creates `env.example` and `.env` with:
+Creates `.env` with:
 
 - Better Auth configuration (secret, URL, telemetry settings)
 - PostgreSQL database URL
@@ -258,28 +274,37 @@ After running the script, your project includes:
 
 ```text
 <app-name>/
-├── api/
-│   └── auth/
-│       └── [...all]/
-│           └── route.ts       # Auth API handler
+├── app/
+│   └── api/
+│       └── auth/
+│           └── [...all]/
+│               └── route.ts       # Auth API handler
+├── docker/
+│   └── compose.dev.yml            # Docker Compose (Postgres, Redis, Mailpit)
 ├── lib/
-│   ├── prisma.ts              # Prisma client
-│   └── auth-client.ts         # Auth client hooks
+│   ├── prisma.ts                  # Prisma client
+│   └── auth-client.ts             # Auth client hooks
 ├── prisma/
-│   ├── schema.prisma          # Database schema
-│   └── generated/             # Generated Prisma client
-├── auth.ts                    # Auth server config
-├── .env                       # Environment variables
-└── env.example                # Environment template
+│   ├── schema.prisma              # Database schema
+│   └── generated/                 # Generated Prisma client
+├── auth.ts                        # Auth server config
+├── prisma.config.ts               # Prisma config with dotenv
+└── .env                           # Environment variables
 ```
 
 ### Next.js Customization
 
+To skip features at scaffold time, use flags:
+
+- **Skip shadcn/ui**: `./new-next.sh --no-shadcn my-app`
+- **Skip Prisma + Auth + Docker**: `./new-next.sh --no-prisma my-app`
+- **Preview without creating anything**: `./new-next.sh --dry-run my-app`
+
 To modify the default setup, edit the script:
 
-- **Change shadcn base color**: Modify line 36 to add `--base-color` flag (e.g., `--base-color zinc`)
-- **Skip specific shadcn components**: Replace `--all` with specific component names on line 37
-- **Add/remove dependencies**: Modify lines 21-33
+- **Change shadcn base color**: Edit the `step_init_shadcn` function to add `--base-color` flag
+- **Skip specific shadcn components**: Replace `--all` with specific component names in `step_init_shadcn`
+- **Add/remove dependencies**: Edit the dep arrays in `step_install_deps` / `step_install_dev_deps`
 - **Customize Better Auth**: Edit the generated `auth.ts` and `lib/auth-client.ts` files
 - **Modify Prisma schema**: Edit `prisma/schema.prisma` after generation
 
