@@ -6,11 +6,9 @@
 
 # --- Defaults ---------------------------------------------------------------
 
-VERSION="1.0.1"
+VERSION="2.0.0"
 APP_NAME=""
 DRY_RUN=false
-WITH_PRISMA=true
-WITH_SHADCN=true
 STEP_NUM=0
 
 # --- Utility functions ------------------------------------------------------
@@ -23,16 +21,12 @@ Usage: ./new-next.sh [flags] <app-name>
 
 Flags:
   --dry-run      Print what would be executed without running anything
-  --no-prisma    Skip Prisma, Docker, and Better Auth setup
-  --no-shadcn    Skip shadcn/ui initialization and component install
   -v, --version  Show version
   --help         Show this help message
 
 Examples:
   ./new-next.sh my-app
   ./new-next.sh --dry-run my-app
-  ./new-next.sh --no-prisma --no-shadcn my-app
-  ./new-next.sh --dry-run --no-shadcn my-app
 EOF
   exit 0
 }
@@ -57,25 +51,9 @@ run_write() {
   fi
 }
 
-# Append to a file, or print the action in dry-run mode
-run_append() {
-  local file="$1"
-  local content="$2"
-  if $DRY_RUN; then
-    echo "  > append \"$content\" to $file"
-  else
-    echo "$content" >> "$file"
-  fi
-}
-
 step() {
   STEP_NUM=$((STEP_NUM + 1))
   echo "[Step $STEP_NUM] $1"
-}
-
-skip() {
-  STEP_NUM=$((STEP_NUM + 1))
-  echo "[Step $STEP_NUM] SKIPPED: $1"
 }
 
 # --- Step functions ---------------------------------------------------------
@@ -96,31 +74,27 @@ step_create_app() {
 
 step_install_dev_deps() {
   step "Install dev dependencies"
-  local deps=(concurrently rimraf)
-  $WITH_PRISMA && deps+=(prisma)
-  run_cmd pnpm add -D "${deps[@]}"
+  run_cmd pnpm add -D \
+    concurrently \
+    rimraf \
+    graphile-migrate \
+    kysely-codegen \
+    @types/pg
 }
 
 step_install_deps() {
   step "Install dependencies"
-  local deps=(
-    @ai-sdk/react
-    @ai-sdk/openai
-    ai
-    date-fns
-    dotenv
-    jotai
-  )
-  if $WITH_PRISMA; then
-    deps+=(
-      @better-fetch/fetch
-      @prisma/adapter-pg
-      @prisma/client
-      better-auth
-      pg
-    )
-  fi
-  run_cmd pnpm add "${deps[@]}"
+  run_cmd pnpm add \
+    @ai-sdk/react \
+    @ai-sdk/openai \
+    @better-fetch/fetch \
+    ai \
+    better-auth \
+    date-fns \
+    dotenv \
+    jotai \
+    kysely \
+    pg
 }
 
 step_init_shadcn() {
@@ -132,18 +106,11 @@ step_init_shadcn() {
 
 step_create_dirs() {
   step "Create directories"
-  local dirs=()
-  $WITH_PRISMA && dirs+=(app/api/auth/\[...all\] prisma docker lib)
-  if [[ ${#dirs[@]} -eq 0 ]]; then
-    echo "  (no directories needed)"
-    return
-  fi
-  run_cmd mkdir -p "${dirs[@]}"
-}
-
-step_update_gitignore() {
-  step "Update .gitignore"
-  run_append .gitignore "prisma/generated"
+  run_cmd mkdir -p \
+    app/api/auth/\[...all\] \
+    migrations/committed \
+    docker \
+    lib
 }
 
 step_generate_docker_compose() {
@@ -209,26 +176,24 @@ step_generate_env() {
     return
   fi
 
-  # Build auth block conditionally
-  local auth_block=""
-  if $WITH_PRISMA; then
-    local secret
-    if command -v openssl >/dev/null 2>&1; then
-      secret=$(openssl rand -base64 32)
-    else
-      secret="replacewithyourverysecretstring"
-    fi
-    auth_block="BETTER_AUTH_TELEMETRY=0
-BETTER_AUTH_SECRET=$secret
-BETTER_AUTH_URL=http://localhost:3000
-
-"
+  local secret
+  if command -v openssl >/dev/null 2>&1; then
+    secret=$(openssl rand -base64 32)
+  else
+    secret="replacewithyourverysecretstring"
   fi
 
   cat > .env <<EOL
+BETTER_AUTH_TELEMETRY=0
+BETTER_AUTH_SECRET=$secret
+BETTER_AUTH_URL=http://localhost:3000
 
-${auth_block}POSTGRES_PASSWORD=password
+POSTGRES_PASSWORD=password
 DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres
+
+# graphile-migrate uses a shadow DB (commit) and a root DB (reset)
+SHADOW_DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres_shadow
+ROOT_DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres
 
 # For mailpit
 SMTP_USER="mailpit"
@@ -238,60 +203,73 @@ SMTP_PORT="1025"
 EOL
 }
 
-step_generate_prisma_files() {
-  step "Generate Prisma files"
+step_generate_db_files() {
+  step "Generate Kysely + graphile-migrate files"
 
-  run_write lib/prisma.ts <<EOL
-import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient } from '@/prisma/generated/client';
+  run_write lib/db.ts <<EOL
+import { Kysely, PostgresDialect } from 'kysely';
+import { Pool } from 'pg';
+import type { DB } from '@/lib/db-types';
 
 const connectionString = process.env.DATABASE_URL;
 
 if (!connectionString) {
-	throw new Error('DATABASE_URL environment variable is not set');
+  throw new Error('DATABASE_URL environment variable is not set');
 }
-
-const adapter = new PrismaPg({ connectionString });
 
 declare global {
   // We need var in declare global
   // eslint-disable-next-line no-var, vars-on-top
-  var prisma: PrismaClient | undefined;
+  var db: Kysely<DB> | undefined;
 }
 
-const prisma = global.prisma || new PrismaClient({ adapter });
+const db =
+  global.db ||
+  new Kysely<DB>({
+    dialect: new PostgresDialect({
+      pool: new Pool({ connectionString }),
+    }),
+  });
 
 if (process.env.NODE_ENV === 'development') {
-  global.prisma = prisma;
+  global.db = db;
 }
 
-export { prisma };
+export { db };
 EOL
 
-  run_write prisma/schema.prisma <<EOL
-generator client {
-  provider = "prisma-client"
-  output   = "./generated"
-}
-datasource db {
-  provider = "postgresql"
-}
+  run_write lib/db-types.ts <<EOL
+/**
+ * Database types for Kysely.
+ *
+ * Auto-generated by kysely-codegen from your live database. After applying
+ * migrations, regenerate with:
+ *
+ *   pnpm db:codegen
+ *
+ * The placeholder below lets the project type-check before the first codegen
+ * run. Do not edit by hand — running codegen overwrites this file.
+ */
+export type DB = Record<string, never>;
 EOL
 
-  run_write prisma.config.ts <<EOL
-import 'dotenv/config'
-import { defineConfig, env } from 'prisma/config'
+  run_write .gmrc.js <<EOL
+require('dotenv/config');
 
-export default defineConfig({
-  schema: 'prisma/schema.prisma',
-  migrations: {
-    path: 'prisma/migrations',
-  },
-  datasource: {
-    url: env('DATABASE_URL'),
-  },
-})
+/** @type {import('graphile-migrate').Settings} */
+module.exports = {
+  connectionString: process.env.DATABASE_URL,
+  shadowConnectionString: process.env.SHADOW_DATABASE_URL,
+  rootConnectionString: process.env.ROOT_DATABASE_URL,
+  pgSettings: {},
+  placeholders: {},
+  afterReset: [],
+  afterAllMigrations: [],
+  afterCurrent: [],
+};
 EOL
+
+  run_write migrations/committed/.gitkeep </dev/null
 }
 
 step_generate_auth_files() {
@@ -322,13 +300,12 @@ EOL
 
   run_write auth.ts <<EOL
 import { apiKey, admin, anonymous } from 'better-auth/plugins';
-import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { betterAuth } from 'better-auth';
-import { prisma } from '@/lib/prisma';
+import { Pool } from 'pg';
 
 export const auth = betterAuth({
-	database: prismaAdapter(prisma, {
-		provider: 'postgresql',
+	database: new Pool({
+		connectionString: process.env.DATABASE_URL,
 	}),
 
 	emailAndPassword: {
@@ -354,14 +331,20 @@ export const { GET, POST } = toNextJsHandler(auth);
 EOL
 }
 
-step_run_prisma_generate() {
-  step "Run prisma generate"
-  run_cmd pnpm dlx prisma generate
+step_run_auth_generate() {
+  step "Run better-auth generate (writes migrations/current.sql)"
+  run_cmd pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql
 }
 
-step_run_auth_generate() {
-  step "Run better-auth generate"
-  run_cmd pnpm dlx @better-auth/cli@latest generate --yes
+step_add_package_scripts() {
+  step "Add package.json scripts"
+  run_cmd npm pkg set \
+    "scripts.db:watch=graphile-migrate watch" \
+    "scripts.db:migrate=graphile-migrate migrate" \
+    "scripts.db:commit=graphile-migrate commit" \
+    "scripts.db:reset=graphile-migrate reset" \
+    "scripts.db:codegen=kysely-codegen --dialect postgres --out-file lib/db-types.ts" \
+    "scripts.auth:generate=pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql"
 }
 
 # --- Parse arguments --------------------------------------------------------
@@ -370,14 +353,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN=true
-      shift
-      ;;
-    --no-prisma)
-      WITH_PRISMA=false
-      shift
-      ;;
-    --no-shadcn)
-      WITH_SHADCN=false
       shift
       ;;
     -v|--version)
@@ -415,30 +390,32 @@ fi
 
 step_install_dev_deps
 step_install_deps
-
-if $WITH_SHADCN; then
-  step_init_shadcn
-else
-  skip "shadcn/ui (--no-shadcn)"
-fi
-
+step_init_shadcn
 step_create_dirs
 step_generate_env
+step_generate_docker_compose
+step_generate_db_files
+step_generate_auth_files
+step_run_auth_generate
+step_add_package_scripts
 
-if $WITH_PRISMA; then
-  step_update_gitignore
-  step_generate_docker_compose
-  step_generate_prisma_files
-  step_generate_auth_files
-  step_run_prisma_generate
-  step_run_auth_generate
-else
-  skip "Prisma setup (--no-prisma)"
-  skip "Docker Compose (--no-prisma)"
-  skip "Better Auth setup (--no-prisma)"
-  skip "prisma generate (--no-prisma)"
-  skip "better-auth generate (--no-prisma)"
-fi
+cat <<EOF
 
-echo ""
-echo "Done! cd $APP_NAME to get started."
+Done! Next steps:
+
+  cd $APP_NAME
+
+  # 1. Start Postgres, Redis, and Mailpit
+  docker compose -f docker/compose.dev.yml --env-file .env up -d
+
+  # 2. Apply the Better Auth migration to your dev database
+  pnpm db:watch --once
+
+  # 3. Generate Kysely types from the database
+  pnpm db:codegen
+
+  # 4. Start the dev server
+  pnpm dev
+
+When the schema is stable, freeze it as a committed migration: pnpm db:commit
+EOF

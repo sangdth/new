@@ -9,6 +9,7 @@ Two convenience scripts to quickly scaffold new projects with common dependencie
 
 - Node.js installed
 - pnpm installed
+- Docker (for the local Postgres / Redis / Mailpit stack)
 - openssl (optional, for generating a random Better Auth secret)
 
 ## Installation
@@ -59,20 +60,14 @@ Two convenience scripts to quickly scaffold new projects with common dependencie
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Print what would be executed without running anything |
-| `--no-prisma` | Skip Prisma, Docker, and Better Auth setup |
-| `--no-shadcn` | Skip shadcn/ui initialization and component install |
 | `-v`, `--version` | Show version |
 | `--help` | Show help message |
-
-> [!NOTE]
-> `--no-prisma` also disables Better Auth and Docker Compose, since auth depends on the Prisma adapter.
 
 #### Examples
 
 ```bash
 ./new-next.sh my-nextjs-app
 ./new-next.sh --dry-run my-nextjs-app
-./new-next.sh --no-prisma --no-shadcn my-nextjs-app
 ```
 
 ### NestJS Project
@@ -114,9 +109,11 @@ Scaffolds a new Next.js project with:
 **Dev Dependencies:**
 
 ```bash
-concurrently  # Run multiple commands concurrently
-prisma        # Prisma CLI
-rimraf        # Cross-platform rm -rf
+concurrently      # Run multiple commands concurrently
+rimraf            # Cross-platform rm -rf
+graphile-migrate  # SQL migration tool
+kysely-codegen    # Generate Kysely types from the database
+@types/pg         # TypeScript types for the pg driver
 ```
 
 **Core Dependencies:**
@@ -125,12 +122,12 @@ rimraf        # Cross-platform rm -rf
 @ai-sdk/react         # AI SDK for React
 @ai-sdk/openai        # OpenAI provider for AI SDK
 @better-fetch/fetch   # Enhanced fetch utility
-@prisma/adapter-pg    # PostgreSQL adapter for Prisma
-@prisma/client        # Prisma ORM client
 ai                    # Vercel AI SDK
 better-auth           # Authentication library
 date-fns              # Date utility library
+dotenv                # Loads .env (used by .gmrc.js)
 jotai                 # State management
+kysely                # Type-safe SQL query builder
 pg                    # PostgreSQL client
 ```
 
@@ -144,7 +141,7 @@ pg                    # PostgreSQL client
 Creates necessary directories:
 
 - `app/api/auth/[...all]/`
-- `prisma/`
+- `migrations/committed/` (graphile-migrate)
 - `docker/`
 - `lib/`
 
@@ -153,21 +150,26 @@ Creates necessary directories:
 Creates `.env` with:
 
 - Better Auth configuration (secret, URL, telemetry settings)
-- PostgreSQL database URL
+- PostgreSQL database URL, plus `SHADOW_DATABASE_URL` and `ROOT_DATABASE_URL` for graphile-migrate
 - SMTP settings for Mailpit (local email testing)
 
-#### Step 6: Configures Prisma
+#### Step 6: Configures the Database (Kysely + graphile-migrate)
 
-Creates `prisma/schema.prisma` with:
+Creates `lib/db.ts` with:
 
-- PostgreSQL datasource
-- Prisma client generator with custom output path
-
-Creates `lib/prisma.ts` with:
-
-- PrismaPg adapter setup
-- Global Prisma client (development-optimized)
+- Kysely client using the `pg` `PostgresDialect`
+- Global instance (development-optimized)
 - Connection string validation
+
+Creates `lib/db-types.ts` with:
+
+- A placeholder `DB` type so the project type-checks before the first codegen run
+- Overwritten by `pnpm db:codegen` once migrations are applied
+
+Creates `.gmrc.js` (graphile-migrate config) that:
+
+- Loads `.env` via `require('dotenv/config')` (graphile-migrate does not auto-load it)
+- Reads `DATABASE_URL`, `SHADOW_DATABASE_URL`, and `ROOT_DATABASE_URL` from the environment
 
 #### Step 7: Configures Better Auth
 
@@ -179,7 +181,7 @@ Creates `lib/auth-client.ts` with:
 Creates `auth.ts` with:
 
 - Server-side auth configuration
-- Prisma adapter integration
+- Connects to PostgreSQL via a raw `pg.Pool` (Better Auth uses Kysely internally)
 - Email/password authentication enabled
 - Auto sign-in after registration
 - Admin, API key, and anonymous plugins
@@ -188,28 +190,44 @@ Creates `api/auth/[...all]/route.ts`:
 
 - Next.js API route handler for Better Auth
 
-#### Step 8: Generates Code
+#### Step 8: Generates Code & Scripts
 
-- Runs `pnpm prisma generate` to generate Prisma client
-- Runs `pnpm dlx @better-auth/cli@latest generate --yes` to generate Better Auth schema
+- Runs `pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql` to write the Better Auth SQL schema into graphile-migrate's current migration
+- Adds `db:watch`, `db:migrate`, `db:commit`, `db:reset`, `db:codegen`, and `auth:generate` scripts to `package.json` via `npm pkg set`
+
+> Kysely types are **not** generated here — `kysely-codegen` introspects a live database, so it runs as a post-setup step once Postgres is up and migrations are applied.
 
 ### Next.js Post-Setup Steps
 
-After the script completes, you're almost ready to go! You just need to:
+After the script completes:
 
-1. **Run Prisma migrations**
+1. **Start the local services** (Postgres, Redis, Mailpit)
 
    ```bash
    cd <app-name>
-   pnpm prisma migrate dev --name init
+   docker compose -f docker/compose.dev.yml --env-file .env up -d
    ```
 
-2. **Update environment variables** (if needed)
-   - Modify `.env` for your specific setup
-   - Add OpenAI API key if using AI features
-   - Update database credentials if not using default
+2. **Apply the Better Auth migration** to your dev database
 
-3. **Start the development server**
+   ```bash
+   pnpm db:watch --once
+   ```
+
+   When the schema is stable, freeze it as a committed migration with `pnpm db:commit`,
+   then apply committed migrations in other environments with `pnpm db:migrate`.
+
+3. **Generate Kysely types** from the database
+
+   ```bash
+   pnpm db:codegen
+   ```
+
+4. **Update environment variables** (if needed)
+   - Add an OpenAI API key if using AI features
+   - Update database credentials if not using the defaults
+
+5. **Start the development server**
 
    ```bash
    pnpm dev
@@ -232,13 +250,13 @@ After running the script, your project includes:
 - ✅ **shadcn/ui** - All components pre-installed
   - Accordion, Alert, Avatar, Badge, Button, Calendar, Card, Checkbox, Collapsible, Command, Context Menu, Dialog, Drawer, Dropdown Menu, Form, Input, Label, Menubar, Navigation Menu, Pagination, Popover, Progress, Radio Group, Scroll Area, Select, Separator, Sheet, Skeleton, Slider, Switch, Table, Tabs, Textarea, Toast, Toggle, Tooltip, and more
 
-#### Next.js Database & ORM
+#### Next.js Database & Migrations
 
-- ✅ **Prisma** - Type-safe ORM with PostgreSQL adapter
+- ✅ **Kysely** - Type-safe SQL query builder
 - ✅ **PostgreSQL** - Database client (pg)
-- ✅ **@prisma/adapter-pg** - Direct PostgreSQL connection
-- ✅ Pre-configured Prisma client with custom output path
-- ✅ Development-optimized global instance
+- ✅ **kysely-codegen** - Generates `DB` types from the live database
+- ✅ **graphile-migrate** - SQL-first migrations (`.gmrc.js`, `migrations/`)
+- ✅ Pre-configured Kysely client with a development-optimized global instance
 
 #### Next.js Authentication
 
@@ -282,31 +300,28 @@ After running the script, your project includes:
 ├── docker/
 │   └── compose.dev.yml            # Docker Compose (Postgres, Redis, Mailpit)
 ├── lib/
-│   ├── prisma.ts                  # Prisma client
+│   ├── db.ts                      # Kysely client
+│   ├── db-types.ts                # Generated Kysely types (kysely-codegen)
 │   └── auth-client.ts             # Auth client hooks
-├── prisma/
-│   ├── schema.prisma              # Database schema
-│   └── generated/                 # Generated Prisma client
-├── auth.ts                        # Auth server config
-├── prisma.config.ts               # Prisma config with dotenv
+├── migrations/
+│   ├── current.sql                # Active migration (Better Auth schema)
+│   └── committed/                 # Committed migrations
+├── auth.ts                        # Auth server config (pg Pool)
+├── .gmrc.js                       # graphile-migrate config
 └── .env                           # Environment variables
 ```
 
 ### Next.js Customization
 
-To skip features at scaffold time, use flags:
-
-- **Skip shadcn/ui**: `./new-next.sh --no-shadcn my-app`
-- **Skip Prisma + Auth + Docker**: `./new-next.sh --no-prisma my-app`
 - **Preview without creating anything**: `./new-next.sh --dry-run my-app`
 
 To modify the default setup, edit the script:
 
 - **Change shadcn base color**: Edit the `step_init_shadcn` function to add `--base-color` flag
 - **Skip specific shadcn components**: Replace `--all` with specific component names in `step_init_shadcn`
-- **Add/remove dependencies**: Edit the dep arrays in `step_install_deps` / `step_install_dev_deps`
+- **Add/remove dependencies**: Edit the `pnpm add` lists in `step_install_deps` / `step_install_dev_deps`
 - **Customize Better Auth**: Edit the generated `auth.ts` and `lib/auth-client.ts` files
-- **Modify Prisma schema**: Edit `prisma/schema.prisma` after generation
+- **Change the database schema**: Edit `migrations/current.sql`, run `pnpm db:watch`, then `pnpm db:codegen`
 
 ---
 
@@ -514,7 +529,8 @@ To modify the default setup, edit the script:
 **Next.js (new-next.sh)**:
 
 - **shadcn init fails**: Ensure you have a compatible Node.js version
-- **Prisma generate fails**: Check that PostgreSQL connection string is valid
+- **`pnpm db:codegen` fails**: Ensure Postgres is running and migrations are applied (`docker compose ... up -d`, then `pnpm db:watch --once`); `kysely-codegen` needs a live database
+- **graphile-migrate can't connect**: Check `DATABASE_URL` / `SHADOW_DATABASE_URL` / `ROOT_DATABASE_URL` in `.env`
 
 **NestJS (new-nest.sh)**:
 
