@@ -104,6 +104,8 @@ Scaffolds a new Next.js project with:
 - No src directory
 - Uses pnpm as package manager
 
+Then **pins Next.js to a stable release** (`next` + `eslint-config-next` to `15.5.19`). `create-next-app` installs `next@latest`, which currently resolves to a preview build (e.g. `16.3.0-preview.0`) whose native SWC binary is not published — so `pnpm dev`/`build` fail trying to download it (404). The pin avoids that until Next 16 is GA.
+
 #### Step 2: Installs Dependencies
 
 **Dev Dependencies:**
@@ -123,13 +125,19 @@ kysely-codegen    # Generate Kysely types from the database
 @ai-sdk/openai        # OpenAI provider for AI SDK
 @better-fetch/fetch   # Enhanced fetch utility
 ai                    # Vercel AI SDK
-better-auth           # Authentication library
+better-auth@1.4.22    # Authentication library (pinned: see note below)
 date-fns              # Date utility library
 dotenv                # Loads .env (used by .gmrc.js)
 jotai                 # State management
-kysely                # Type-safe SQL query builder
+kysely@^0.28.5        # Type-safe SQL query builder (pinned to better-auth's peer)
 pg                    # PostgreSQL client
 ```
+
+> [!NOTE]
+> `better-auth` is pinned to the `1.4` line. Its `latest` (`1.6.x`) dropped the
+> `apiKey` plugin from the barrel export and has no matching `@better-auth/cli`
+> release yet, which breaks `auth.ts` and schema generation. `kysely` is held on
+> `0.28.x` to satisfy better-auth 1.4's peer range (`^0.28.5`).
 
 #### Step 3: Initializes shadcn/ui
 
@@ -190,25 +198,30 @@ Creates `api/auth/[...all]/route.ts`:
 
 - Next.js API route handler for Better Auth
 
-#### Step 8: Generates Code & Scripts
+#### Step 8: Adds package.json Scripts
 
-- Runs `pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql` to write the Better Auth SQL schema into graphile-migrate's current migration
 - Adds `db:watch`, `db:migrate`, `db:commit`, `db:reset`, `db:codegen`, and `auth:generate` scripts to `package.json` via `npm pkg set`
 
-> Kysely types are **not** generated here — `kysely-codegen` introspects a live database, so it runs as a post-setup step once Postgres is up and migrations are applied.
+> Neither the Better Auth schema nor the Kysely types are generated at scaffold time — both need a **live database** (the Better Auth `pg` adapter introspects the DB to diff the schema, and `kysely-codegen` reads it). They run as post-setup steps once Postgres is up (`pnpm auth:generate`, then `pnpm db:codegen`).
 
 ### Next.js Post-Setup Steps
 
 After the script completes:
 
-1. **Start the local services** (Postgres, Redis, Mailpit)
+1. **Start the local services** (Postgres, Redis, Mailpit) — `--wait` blocks until healthy
 
    ```bash
    cd <app-name>
-   docker compose -f docker/compose.dev.yml --env-file .env up -d
+   docker compose -f docker/compose.dev.yml --env-file .env up -d --wait
    ```
 
-2. **Apply the Better Auth migration** to your dev database
+2. **Generate the Better Auth schema** into `migrations/current.sql` (needs the DB running)
+
+   ```bash
+   pnpm auth:generate
+   ```
+
+3. **Apply the migration** to your dev database
 
    ```bash
    pnpm db:watch --once
@@ -217,17 +230,17 @@ After the script completes:
    When the schema is stable, freeze it as a committed migration with `pnpm db:commit`,
    then apply committed migrations in other environments with `pnpm db:migrate`.
 
-3. **Generate Kysely types** from the database
+4. **Generate Kysely types** from the database
 
    ```bash
    pnpm db:codegen
    ```
 
-4. **Update environment variables** (if needed)
+5. **Update environment variables** (if needed)
    - Add an OpenAI API key if using AI features
    - Update database credentials if not using the defaults
 
-5. **Start the development server**
+6. **Start the development server**
 
    ```bash
    pnpm dev
@@ -239,7 +252,7 @@ After running the script, your project includes:
 
 #### Next.js Core Framework
 
-- ✅ **Next.js** (latest) - React framework with App Router
+- ✅ **Next.js** (`15.5.x`, pinned stable) - React framework with App Router
 - ✅ **TypeScript** - Type-safe development
 - ✅ **Turbopack** - Fast bundler
 - ✅ **ESLint** - Code linting

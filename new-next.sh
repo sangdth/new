@@ -6,7 +6,9 @@
 
 # --- Defaults ---------------------------------------------------------------
 
-VERSION="2.0.0"
+VERSION="2.0.1"
+NEXT_VERSION="15.5.19"
+BETTER_AUTH_VERSION="1.4.22"
 APP_NAME=""
 DRY_RUN=false
 STEP_NUM=0
@@ -72,6 +74,14 @@ step_create_app() {
     --use-pnpm
 }
 
+step_pin_next() {
+  step "Pin Next.js to a stable release"
+  # create-next-app installs next@latest, which currently resolves to a preview
+  # (e.g. 16.3.0-preview.0) whose native SWC binary is not published — so dev/build
+  # fail trying to download it (404). Pin to the latest stable line until 16.x is GA.
+  run_cmd pnpm add next@$NEXT_VERSION eslint-config-next@$NEXT_VERSION
+}
+
 step_install_dev_deps() {
   step "Install dev dependencies"
   run_cmd pnpm add -D \
@@ -84,16 +94,19 @@ step_install_dev_deps() {
 
 step_install_deps() {
   step "Install dependencies"
+  # better-auth is pinned to the 1.4 line: its `latest` (1.6.x) dropped the apiKey
+  # plugin from the barrel export and has no matching @better-auth/cli release yet.
+  # kysely is held on 0.28.x to satisfy better-auth 1.4's peer range (^0.28.5).
   run_cmd pnpm add \
     @ai-sdk/react \
     @ai-sdk/openai \
     @better-fetch/fetch \
     ai \
-    better-auth \
+    better-auth@$BETTER_AUTH_VERSION \
     date-fns \
     dotenv \
     jotai \
-    kysely \
+    kysely@^0.28.5 \
     pg
 }
 
@@ -126,7 +139,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - $APP_NAME-postgres-data:/var/lib/postgresql/data
+      # Postgres 18+ stores data in a versioned subdir; mount the parent directory.
+      - $APP_NAME-postgres-data:/var/lib/postgresql
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -191,9 +205,10 @@ BETTER_AUTH_URL=http://localhost:3000
 POSTGRES_PASSWORD=password
 DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres
 
-# graphile-migrate uses a shadow DB (commit) and a root DB (reset)
+# graphile-migrate uses a shadow DB (commit) and a root/maintenance DB (reset).
+# All three connection strings must differ, so root points at the default template1.
 SHADOW_DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres_shadow
-ROOT_DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres
+ROOT_DATABASE_URL=postgresql://postgres:password@localhost:5432/template1
 
 # For mailpit
 SMTP_USER="mailpit"
@@ -331,11 +346,6 @@ export const { GET, POST } = toNextJsHandler(auth);
 EOL
 }
 
-step_run_auth_generate() {
-  step "Run better-auth generate (writes migrations/current.sql)"
-  run_cmd pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql
-}
-
 step_add_package_scripts() {
   step "Add package.json scripts"
   run_cmd npm pkg set \
@@ -344,7 +354,7 @@ step_add_package_scripts() {
     "scripts.db:commit=graphile-migrate commit" \
     "scripts.db:reset=graphile-migrate reset" \
     "scripts.db:codegen=kysely-codegen --dialect postgres --out-file lib/db-types.ts" \
-    "scripts.auth:generate=pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql"
+    "scripts.auth:generate=pnpm dlx @better-auth/cli@$BETTER_AUTH_VERSION generate --yes --output migrations/current.sql"
 }
 
 # --- Parse arguments --------------------------------------------------------
@@ -388,6 +398,7 @@ else
   cd "$APP_NAME" || die "Failed to cd into $APP_NAME"
 fi
 
+step_pin_next
 step_install_dev_deps
 step_install_deps
 step_init_shadcn
@@ -396,7 +407,6 @@ step_generate_env
 step_generate_docker_compose
 step_generate_db_files
 step_generate_auth_files
-step_run_auth_generate
 step_add_package_scripts
 
 cat <<EOF
@@ -405,16 +415,20 @@ Done! Next steps:
 
   cd $APP_NAME
 
-  # 1. Start Postgres, Redis, and Mailpit
-  docker compose -f docker/compose.dev.yml --env-file .env up -d
+  # 1. Start Postgres, Redis, and Mailpit (waits until healthy)
+  docker compose -f docker/compose.dev.yml --env-file .env up -d --wait
 
-  # 2. Apply the Better Auth migration to your dev database
+  # 2. Generate the Better Auth schema into migrations/current.sql
+  #    (needs the database running — the pg adapter introspects it)
+  pnpm auth:generate
+
+  # 3. Apply the migration to your dev database
   pnpm db:watch --once
 
-  # 3. Generate Kysely types from the database
+  # 4. Generate Kysely types from the database
   pnpm db:codegen
 
-  # 4. Start the dev server
+  # 5. Start the dev server
   pnpm dev
 
 When the schema is stable, freeze it as a committed migration: pnpm db:commit
