@@ -6,8 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A collection of shell scripts that scaffold new projects with opinionated defaults. Not a runnable application — the scripts generate applications.
 
-- `new-next.sh` — scaffolds a Next.js project (App Router, TypeScript, Tailwind, shadcn/ui, Kysely + graphile-migrate, Better Auth, Vercel AI SDK, Jotai)
-- `new-nest.sh` — scaffolds a NestJS project (TypeScript, Prisma, Better Auth, `@thallesp/nestjs-better-auth`)
+Each script lives in its own directory alongside its detailed README; the root `README.md` is a generic hub that links to both:
+
+- `next/new-next.sh` — scaffolds a Next.js project (App Router, TypeScript, Tailwind, shadcn/ui, Kysely + graphile-migrate, Better Auth, Vercel AI SDK, Jotai). Docs: `next/README.md`
+- `nest/new-nest.sh` — scaffolds a NestJS project (TypeScript, Prisma, Better Auth, `@thallesp/nestjs-better-auth`). Docs: `nest/README.md`
 
 ## Tech Stack of Generated Projects
 
@@ -22,11 +24,14 @@ There are no automated tests. To verify a script change:
 
 ```bash
 # Next.js script (placeholder DB types let the build pass before codegen)
-./new-next.sh test-app && cd test-app && pnpm build
+cd next && ./new-next.sh test-app && cd test-app && pnpm build
 
 # NestJS script
-./new-nest.sh test-app && cd test-app && pnpm prisma generate && pnpm build
+cd nest && ./new-nest.sh test-app && cd test-app && pnpm prisma generate && pnpm build
 ```
+
+Scripts create the project as a subdirectory of the current working directory, so
+test output lands in `next/test-app` / `nest/test-app`.
 
 Clean up test output with `rm -rf test-app`.
 
@@ -57,6 +62,6 @@ compilation itself succeeds.
 - The scripts use heredocs (`cat > file <<EOL ... EOL`) to generate files. Watch for shell variable expansion — `$` characters intended for the generated code must be escaped as `\$`.
 - Generated file paths differ between Next.js (root-level `lib/`, `auth.ts`) and NestJS (`src/` directory structure).
 - Before bumping a pinned version (`NEXT_VERSION`, `BETTER_AUTH_VERSION`, the `kysely` range, or NestJS's unpinned `prisma`/`better-auth`), check that package's actual changelog/release notes first — every existing pin exists because `latest` broke something (see Key Patterns); don't unpin without confirming upstream actually fixed it.
-- Validate with `bash -n new-next.sh` (or `new-nest.sh`), then `--dry-run` for Next.js, before running a full scaffold. There's no lighter substitute for correctness here than the real `Testing Changes to Scripts` flow above — the script has no linter/typecheck of its own.
-- After modifying dependencies or fixing a scaffold bug, keep README.md's feature lists **and** this file's Key Patterns section in sync — both have drifted out of date after fixes before.
+- Validate with `bash -n next/new-next.sh` (or `nest/new-nest.sh`), then `--dry-run` for Next.js, before running a full scaffold. There's no lighter substitute for correctness here than the real `Testing Changes to Scripts` flow above — the script has no linter/typecheck of its own.
+- After modifying dependencies or fixing a scaffold bug, keep the **script's own README** (`next/README.md` or `nest/README.md`) and this file's Key Patterns section in sync — both have drifted out of date after fixes before. The root `README.md` is generic and usually doesn't need touching unless installation or repo layout changes.
 - For scaffold failures (script bug vs. upstream package break, Docker/Postgres/graphile-migrate issues, generated-project build errors), use the `scaffold-debugger` subagent (`.claude/agents/scaffold-debugger.md`) rather than debugging ad hoc — it documents this repo's known failure categories.
