@@ -64,6 +64,11 @@ new/
    > Make sure `~/.local/bin` is on your `PATH`. If it isn't, add
    > `export PATH="$HOME/.local/bin:$PATH"` to your `~/.zshrc`.
 
+   > [!IMPORTANT]
+   > Use `ln -sf` to **re-point** these symlinks whenever a script moves within the
+   > repo. A symlink to a moved file dangles silently — you get
+   > `no such file or directory`, not a helpful error.
+
    If you'd rather copy the scripts into a system directory instead of symlinking,
    note that they'll no longer track the repo and you'll need to re-copy after updates:
 

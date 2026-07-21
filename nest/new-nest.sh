@@ -1,7 +1,11 @@
 #!/bin/bash
 
+# Invocation name, so usage text matches how the script was actually called —
+# "./new-nest.sh" when run directly, "nns" when run via a symlink.
+PROG="$(basename "$0")"
+
 if [ -z "$1" ]; then
-  echo "Usage: ./new-nest.sh <app-name>"
+  echo "Usage: $PROG <app-name>"
   exit 1
 fi
 

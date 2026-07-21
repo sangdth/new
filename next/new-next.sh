@@ -6,20 +6,22 @@
 
 # --- Defaults ---------------------------------------------------------------
 
-VERSION="2.0.1"
-NEXT_VERSION="15.5.19"
-BETTER_AUTH_VERSION="1.4.22"
+VERSION="3.0.0"
 APP_NAME=""
 DRY_RUN=false
 STEP_NUM=0
+
+# Invocation name, so help/version text matches how the script was actually
+# called — "./new-next.sh" when run directly, "nnx" when run via a symlink.
+PROG="$(basename "$0")"
 
 # --- Utility functions ------------------------------------------------------
 
 die() { echo "Error: $1" >&2; exit 1; }
 
 print_usage() {
-  cat <<'EOF'
-Usage: ./new-next.sh [flags] <app-name>
+  cat <<EOF
+Usage: $PROG [flags] <app-name>
 
 Flags:
   --dry-run      Print what would be executed without running anything
@@ -27,8 +29,10 @@ Flags:
   --help         Show this help message
 
 Examples:
-  ./new-next.sh my-app
-  ./new-next.sh --dry-run my-app
+  $PROG my-app
+  $PROG --dry-run my-app
+
+Creates the project as a subdirectory of the current working directory.
 EOF
   exit 0
 }
@@ -74,14 +78,6 @@ step_create_app() {
     --use-pnpm
 }
 
-step_pin_next() {
-  step "Pin Next.js to a stable release"
-  # create-next-app installs next@latest, which currently resolves to a preview
-  # (e.g. 16.3.0-preview.0) whose native SWC binary is not published — so dev/build
-  # fail trying to download it (404). Pin to the latest stable line until 16.x is GA.
-  run_cmd pnpm add next@$NEXT_VERSION eslint-config-next@$NEXT_VERSION
-}
-
 step_install_dev_deps() {
   step "Install dev dependencies"
   run_cmd pnpm add -D \
@@ -94,19 +90,20 @@ step_install_dev_deps() {
 
 step_install_deps() {
   step "Install dependencies"
-  # better-auth is pinned to the 1.4 line: its `latest` (1.6.x) dropped the apiKey
-  # plugin from the barrel export and has no matching @better-auth/cli release yet.
-  # kysely is held on 0.28.x to satisfy better-auth 1.4's peer range (^0.28.5).
+  # Nothing here is pinned. The apiKey plugin ships as its own package
+  # (@better-auth/api-key) rather than in the better-auth barrel export, so it is
+  # installed alongside better-auth instead of being pulled from it.
   run_cmd pnpm add \
     @ai-sdk/react \
     @ai-sdk/openai \
     @better-fetch/fetch \
     ai \
-    better-auth@$BETTER_AUTH_VERSION \
+    better-auth \
+    @better-auth/api-key \
     date-fns \
     dotenv \
     jotai \
-    kysely@^0.28.5 \
+    kysely \
     pg
 }
 
@@ -233,8 +230,8 @@ if (!connectionString) {
 }
 
 declare global {
-  // We need var in declare global
-  // eslint-disable-next-line no-var, vars-on-top
+  // \`var\` is required here: let/const don't create properties on globalThis,
+  // so the singleton below wouldn't survive a hot reload.
   var db: Kysely<DB> | undefined;
 }
 
@@ -291,11 +288,8 @@ step_generate_auth_files() {
   step "Generate Better Auth files"
 
   run_write lib/auth-client.ts <<EOL
-import {
-	adminClient,
-	apiKeyClient,
-	anonymousClient,
-} from 'better-auth/client/plugins';
+import { adminClient, anonymousClient } from 'better-auth/client/plugins';
+import { apiKeyClient } from '@better-auth/api-key/client';
 import { createAuthClient } from 'better-auth/react';
 
 export const authClient = createAuthClient({
@@ -303,7 +297,7 @@ export const authClient = createAuthClient({
 });
 
 export const {
-	forgetPassword,
+	requestPasswordReset,
 	resetPassword,
 	signIn,
 	signOut,
@@ -314,7 +308,8 @@ export const {
 EOL
 
   run_write auth.ts <<EOL
-import { apiKey, admin, anonymous } from 'better-auth/plugins';
+import { admin, anonymous } from 'better-auth/plugins';
+import { apiKey } from '@better-auth/api-key';
 import { betterAuth } from 'better-auth';
 import { Pool } from 'pg';
 
@@ -354,7 +349,7 @@ step_add_package_scripts() {
     "scripts.db:commit=graphile-migrate commit" \
     "scripts.db:reset=graphile-migrate reset" \
     "scripts.db:codegen=kysely-codegen --dialect postgres --out-file lib/db-types.ts" \
-    "scripts.auth:generate=pnpm dlx @better-auth/cli@$BETTER_AUTH_VERSION generate --yes --output migrations/current.sql"
+    "scripts.auth:generate=pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql"
 }
 
 # --- Parse arguments --------------------------------------------------------
@@ -366,7 +361,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -v|--version)
-      echo "new-next.sh $VERSION"
+      echo "$PROG $VERSION"
       exit 0
       ;;
     --help)
@@ -398,7 +393,6 @@ else
   cd "$APP_NAME" || die "Failed to cd into $APP_NAME"
 fi
 
-step_pin_next
 step_install_dev_deps
 step_install_deps
 step_init_shadcn

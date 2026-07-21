@@ -7,8 +7,13 @@ Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Ky
 ## Usage
 
 ```bash
-./new-next.sh [flags] <app-name>
+./new-next.sh [flags] <app-name>   # from this directory
+nnx [flags] <app-name>             # from anywhere, if symlinked
 ```
+
+The script creates the project as a subdirectory of your **current working
+directory**, not of the repo — so `cd` to wherever you want the project to live
+first. Help and version output adapt to the name you invoked it under.
 
 ### Flags
 
@@ -41,7 +46,9 @@ Scaffolds a new Next.js project with:
 - No src directory
 - Uses pnpm as package manager
 
-Then **pins Next.js to a stable release** (`next` + `eslint-config-next` to `15.5.19`). `create-next-app` installs `next@latest`, which currently resolves to a preview build (e.g. `16.3.0-preview.0`) whose native SWC binary is not published — so `pnpm dev`/`build` fail trying to download it (404). The pin avoids that until Next 16 is GA.
+Whatever version `create-next-app` installs is kept as-is. The script used to pin
+Next backwards afterwards; see the note under Core Dependencies for why it no
+longer does.
 
 ### Step 2: Installs Dependencies
 
@@ -62,19 +69,30 @@ kysely-codegen    # Generate Kysely types from the database
 @ai-sdk/openai        # OpenAI provider for AI SDK
 @better-fetch/fetch   # Enhanced fetch utility
 ai                    # Vercel AI SDK
-better-auth@1.4.22    # Authentication library (pinned: see note below)
+better-auth           # Authentication library
+@better-auth/api-key  # apiKey plugin (ships separately from the barrel)
 date-fns              # Date utility library
 dotenv                # Loads .env (used by .gmrc.js)
 jotai                 # State management
-kysely@^0.28.5        # Type-safe SQL query builder (pinned to better-auth's peer)
+kysely                # Type-safe SQL query builder
 pg                    # PostgreSQL client
 ```
 
 > [!NOTE]
-> `better-auth` is pinned to the `1.4` line. Its `latest` (`1.6.x`) dropped the
-> `apiKey` plugin from the barrel export and has no matching `@better-auth/cli`
-> release yet, which breaks `auth.ts` and schema generation. `kysely` is held on
-> `0.28.x` to satisfy better-auth 1.4's peer range (`^0.28.5`).
+> Nothing is pinned as of v3.0.0. The old `next` pin was added when `latest`
+> briefly resolved to a preview whose SWC binary was unpublished; that stopped
+> being true, but the pin stayed, and because it downgraded Next *after*
+> `create-next-app` had generated config for a newer major, it silently broke
+> `eslint.config.mjs` and dropped `--turbopack` from the `dev` script. Prefer
+> `pnpm create next-app@<version>` if you ever need a specific major, so the
+> generated config matches what is installed.
+>
+> The `apiKey` plugin is not in the `better-auth/plugins` barrel — it ships as
+> `@better-auth/api-key`, imported from that package on the server and from
+> `@better-auth/api-key/client` on the client. `@better-auth/cli` releases behind
+> the runtime; that gap is normal and works. What matters is that
+> `migrations/current.sql` ends up with a `create table` for every configured
+> plugin.
 
 ### Step 3: Initializes shadcn/ui
 
@@ -189,7 +207,7 @@ After running the script, your project includes:
 
 ### Core Framework
 
-- ✅ **Next.js** (`15.5.x`, pinned stable) - React framework with App Router
+- ✅ **Next.js** (whatever `create-next-app` installs) - React framework with App Router
 - ✅ **TypeScript** - Type-safe development
 - ✅ **Turbopack** - Fast bundler
 - ✅ **ESLint** - Code linting
@@ -272,7 +290,7 @@ To modify the default setup, edit the script:
 - **Add/remove dependencies**: Edit the `pnpm add` lists in `step_install_deps` / `step_install_dev_deps`
 - **Customize Better Auth**: Edit the generated `auth.ts` and `lib/auth-client.ts` files
 - **Change the database schema**: Edit `migrations/current.sql`, run `pnpm db:watch`, then `pnpm db:codegen`
-- **Change pinned versions**: Edit `NEXT_VERSION` / `BETTER_AUTH_VERSION` at the top of the script (check the upstream changelog first — see the note in Step 2)
+- **Pin a version**: There are no version variables any more. Prefer not to add one — the last set of pins caused more breakage than they prevented (see the note in Step 2). If a `latest` genuinely breaks, verify it against the registry rather than assuming, and pin the narrowest thing that fixes it
 
 ## Troubleshooting
 

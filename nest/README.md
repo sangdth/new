@@ -7,14 +7,19 @@ Scaffolds a NestJS project with TypeScript, Prisma (via `@prisma/adapter-pg`), a
 ## Usage
 
 ```bash
-./new-nest.sh <app-name>
+./new-nest.sh <app-name>   # from this directory
+nns <app-name>             # from anywhere, if symlinked
 ```
 
 Example:
 
 ```bash
 ./new-nest.sh my-nestjs-app
+nns my-nestjs-app
 ```
+
+The script creates the project as a subdirectory of your **current working
+directory**, not of the repo — so `cd` to wherever you want the project to live first.
 
 > [!NOTE]
 > Unlike `new-next.sh`, this script takes no flags — no `--dry-run`, no `--version`.
@@ -52,11 +57,17 @@ pg                            # PostgreSQL client
 ```
 
 > [!NOTE]
-> Unlike the Next.js script, nothing here is version-pinned — `better-auth` installs
-> at `latest`. The Next.js script pins it to `1.4.22` because `1.6.x` dropped the
-> `apiKey` plugin from the barrel export. `src/auth.ts` generated here imports
-> `apiKey` the same way, so if a fresh scaffold fails on that import, pin
-> `better-auth` to `1.4.22` in the `pnpm add` list.
+> Nothing here is version-pinned — `better-auth` installs at `latest`. (Neither
+> does the Next.js script any more, as of `new-next.sh` v3.0.0.)
+>
+> The `apiKey` plugin is no longer exported from `better-auth/plugins`; it ships
+> as its own package, `@better-auth/api-key`. `src/auth.ts` generated here still
+> imports it from the barrel, so a fresh scaffold is expected to fail on that
+> import until the script is updated to add `@better-auth/api-key` to the
+> `pnpm add` list and import `apiKey` from it. Pinning `better-auth` back to
+> `1.4.22` also silences it, but that trades a one-line import fix for a stale
+> runtime. **This path has not been re-verified since the Next.js script was
+> updated — the NestJS scaffold needs its own end-to-end run.**
 
 ### Step 3: Generates NestJS Resources
 
@@ -226,7 +237,7 @@ To modify the default setup, edit the script:
 ## Troubleshooting
 
 - **NestJS CLI fails**: Ensure `@nestjs/cli` can be accessed via pnpm dlx
-- **Better Auth generation fails**: Verify the `--config src/auth.ts` path is correct. If it fails on the `apiKey` import, pin `better-auth` to `1.4.22` (see the note in Step 2)
+- **Better Auth generation fails**: Verify the `--config src/auth.ts` path is correct. If it fails on the `apiKey` import, the plugin has moved to `@better-auth/api-key` — install that package and import `apiKey` from it rather than from `better-auth/plugins` (see the note in Step 2)
 - **`prisma migrate` can't connect**: This script generates no Docker stack — confirm Postgres is actually running at your `DATABASE_URL`
 
 See the [root README](../README.md#troubleshooting) for issues common to both scripts.
