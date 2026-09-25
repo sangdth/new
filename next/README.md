@@ -28,7 +28,7 @@ first. Help and version output adapt to the name you invoked it under.
 | Env var          | Default                        | Purpose                           |
 | ---------------- | ------------------------------ | --------------------------------- |
 | `NNX_MODEL`      | `opencode-go/deepseek-v4-pro`  | Model for the opencode step       |
-| `NNX_AI_TIMEOUT` | `900`                          | Seconds before opencode is killed |
+| `NNX_AI_TIMEOUT` | `1000`                         | Seconds before opencode is killed |
 
 The opencode step needs a working [opencode](https://opencode.ai) install and a
 provider for `NNX_MODEL` (the default uses an OpenCode Go subscription). If

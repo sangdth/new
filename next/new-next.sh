@@ -212,30 +212,22 @@ EOL
 step_generate_env() {
   step "Generate .env"
 
-  if $DRY_RUN; then
-    echo "  > write .env"
-    return
-  fi
+  local secret password="password"
+  secret=$(openssl rand -base64 32 2>/dev/null || echo "replacewithyourverysecretstring")
+  local pg="postgresql://postgres:$password@localhost:5432"
 
-  local secret
-  if command -v openssl >/dev/null 2>&1; then
-    secret=$(openssl rand -base64 32)
-  else
-    secret="replacewithyourverysecretstring"
-  fi
-
-  cat > .env <<EOL
+  run_write .env <<EOL
 BETTER_AUTH_TELEMETRY=0
 BETTER_AUTH_SECRET=$secret
 BETTER_AUTH_URL=http://localhost:3000
 
-POSTGRES_PASSWORD=password
-DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres
+POSTGRES_PASSWORD=$password
+DATABASE_URL=$pg/postgres
 
 # graphile-migrate uses a shadow DB (commit) and a root/maintenance DB (reset).
 # All three connection strings must differ, so root points at the default template1.
-SHADOW_DATABASE_URL=postgresql://postgres:password@localhost:5432/postgres_shadow
-ROOT_DATABASE_URL=postgresql://postgres:password@localhost:5432/template1
+SHADOW_DATABASE_URL=$pg/postgres_shadow
+ROOT_DATABASE_URL=$pg/template1
 
 # For mailpit
 SMTP_USER="mailpit"
@@ -318,6 +310,7 @@ step_add_package_scripts() {
   step "Add package.json scripts"
   # Every compose call needs --env-file .env; without it POSTGRES_PASSWORD
   # silently interpolates to an empty string, so the docker:* scripts carry it.
+  local compose="docker compose -f docker/compose.dev.yml --env-file .env"
   run_cmd npm pkg set \
     "scripts.typecheck=tsc --noEmit" \
     "scripts.db:watch=graphile-migrate watch" \
@@ -326,11 +319,11 @@ step_add_package_scripts() {
     "scripts.db:reset=graphile-migrate reset" \
     "scripts.db:codegen=kysely-codegen --dialect postgres --exclude-pattern graphile_migrate.* --out-file lib/db-types.ts" \
     "scripts.auth:generate=pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql" \
-    "scripts.docker=docker compose -f docker/compose.dev.yml --env-file .env up -d --wait" \
-    "scripts.docker:stop=docker compose -f docker/compose.dev.yml --env-file .env stop" \
-    "scripts.docker:down=docker compose -f docker/compose.dev.yml --env-file .env down" \
-    "scripts.docker:ps=docker compose -f docker/compose.dev.yml --env-file .env ps -a" \
-    "scripts.docker:logs=docker compose -f docker/compose.dev.yml --env-file .env logs -f"
+    "scripts.docker=$compose up -d --wait" \
+    "scripts.docker:stop=$compose stop" \
+    "scripts.docker:down=$compose down" \
+    "scripts.docker:ps=$compose ps -a" \
+    "scripts.docker:logs=$compose logs -f"
 }
 
 step_snapshot() {
@@ -433,8 +426,8 @@ step_wire_auth() {
       kill "$pid" 2>/dev/null || true
       break
     fi
-    sleep 5
-    waited=$((waited + 5))
+    sleep 1
+    waited=$((waited + 1))
   done
   # opencode's exit code isn't documented; the gate below is the real check.
   wait "$pid" || true
@@ -442,11 +435,7 @@ step_wire_auth() {
 
 step_verify() {
   step "Verify: typecheck, lint, build"
-  if $DRY_RUN; then
-    echo "  > pnpm typecheck && pnpm lint && pnpm build"
-    return
-  fi
-  if ! { pnpm typecheck && pnpm lint && pnpm build; }; then
+  if ! { run_cmd pnpm typecheck && run_cmd pnpm lint && run_cmd pnpm build; }; then
     die "verification failed. Review what opencode changed with: cd $APP_NAME && git diff"
   fi
 }
@@ -500,11 +489,7 @@ done
 check_prereqs
 step_create_app
 
-if $DRY_RUN; then
-  echo "  > cd $APP_NAME"
-else
-  cd "$APP_NAME" || die "Failed to cd into $APP_NAME"
-fi
+run_cmd cd "$APP_NAME" || die "Failed to cd into $APP_NAME"
 
 step_install_dev_deps
 step_install_deps
