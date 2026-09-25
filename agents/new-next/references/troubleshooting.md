@@ -364,3 +364,10 @@ left over from a partial run.
 **Fix.** Check `node --version` against the shadcn requirement, remove any
 partial `components.json`, and re-run. If `add --all` fails partway, it's safe to
 re-run — it skips components already present.
+
+**If it's the preset the CLI rejects**, that's a bad code, not a Node problem —
+don't go version-hunting. Check the code was normalized to its bare form (a
+pasted `--preset <code>` passed through whole becomes `--preset --preset
+<code>`), then ask the user to re-copy it from the theme builder. Fall back to
+`--defaults` rather than blocking the scaffold, and tell them the preset was
+skipped.

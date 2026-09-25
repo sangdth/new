@@ -17,16 +17,28 @@ first. Help and version output adapt to the name you invoked it under.
 
 ### Flags
 
-| Flag | Description |
-|------|-------------|
-| `--dry-run` | Print what would be executed without running anything |
-| `-v`, `--version` | Show version |
-| `--help` | Show help message |
+| Flag              | Description                                                      |
+| ----------------- | ---------------------------------------------------------------- |
+| `--preset <code>` | shadcn preset code from the theme builder (default: `b1oVxsfY`)  |
+| `--no-ai`         | Skip the opencode step that writes the auth code                 |
+| `--dry-run`       | Print what would be executed without running anything            |
+| `-v`, `--version` | Show version                                                     |
+| `--help`          | Show help message                                                |
+
+| Env var          | Default                        | Purpose                           |
+| ---------------- | ------------------------------ | --------------------------------- |
+| `NNX_MODEL`      | `opencode-go/deepseek-v4-pro`  | Model for the opencode step       |
+| `NNX_AI_TIMEOUT` | `900`                          | Seconds before opencode is killed |
+
+The opencode step needs a working [opencode](https://opencode.ai) install and a
+provider for `NNX_MODEL` (the default uses an OpenCode Go subscription). If
+`opencode --version` fails, the script warns and continues as `--no-ai`.
 
 ### Examples
 
 ```bash
 ./new-next.sh my-nextjs-app
+./new-next.sh --preset b1f3nwcmmG my-nextjs-app
 ./new-next.sh --dry-run my-nextjs-app
 ```
 
@@ -96,14 +108,15 @@ pg                    # PostgreSQL client
 
 ### Step 3: Initializes shadcn/ui
 
-- Runs `shadcn init` with default configuration (neutral base color)
+- Runs `shadcn init --preset b1oVxsfY --template next --pointer` (`--preset`
+  swaps the code). A preset carries the whole design system and can only be
+  applied at `init`
 - Installs **all** available shadcn/ui components
 
 ### Step 4: Sets Up Project Structure
 
 Creates necessary directories:
 
-- `app/api/auth/[...all]/`
 - `migrations/committed/` (graphile-migrate)
 - `docker/`
 - `lib/`
@@ -134,28 +147,44 @@ Creates `.gmrc.js` (graphile-migrate config) that:
 - Loads `.env` via `require('dotenv/config')` (graphile-migrate does not auto-load it)
 - Reads `DATABASE_URL`, `SHADOW_DATABASE_URL`, and `ROOT_DATABASE_URL` from the environment
 
-### Step 7: Configures Better Auth
+### Step 7: Adds package.json Scripts
 
-Creates `lib/auth-client.ts` with:
+Adds via `npm pkg set`:
 
-- Client-side auth hooks (signIn, signUp, signOut, etc.)
-- Admin, API key, and anonymous plugins enabled
+- `typecheck`
+- `db:watch`, `db:migrate`, `db:commit`, `db:reset`
+- `db:codegen` (excludes graphile-migrate's own tables from the `DB` type)
+- `auth:generate`
+- `docker`, `docker:stop`, `docker:down`, `docker:ps`, `docker:logs`. Every
+  compose call needs `--env-file .env`; without it `POSTGRES_PASSWORD` silently
+  becomes empty, so these scripts carry the flag
 
-Creates `auth.ts` with:
+### Step 8: Commits a Snapshot
 
-- Server-side auth configuration
-- Connects to PostgreSQL via a raw `pg.Pool` (Better Auth uses Kysely internally)
-- Email/password authentication enabled
-- Auto sign-in after registration
-- Admin, API key, and anonymous plugins
+Commits everything so far, so the next step's changes show up on their own in
+`git diff`. Makes sure `.env` is git-ignored first.
 
-Creates `api/auth/[...all]/route.ts`:
+### Step 9: Wires Better Auth with opencode
 
-- Next.js API route handler for Better Auth
+Runs `opencode run --auto` headlessly with a prompt that describes **what** to
+build, not the code. The model reads the installed packages' types, so the code
+follows whatever versions got installed instead of a template that goes stale.
+It writes:
 
-### Step 8: Adds package.json Scripts
+- `auth.ts`: Better Auth on a raw `pg.Pool`, email/password with auto sign-in,
+  admin (default role `MEMBER`), API key and anonymous plugins
+- `lib/auth-client.ts`: React client with matching plugins and exported hooks
+- `app/api/auth/[...all]/route.ts`: the route handler
+- ESLint override blocks for `.gmrc.js` and the vendored shadcn files
 
-- Adds `db:watch`, `db:migrate`, `db:commit`, `db:reset`, `db:codegen`, and `auth:generate` scripts to `package.json` via `npm pkg set`
+Guardrails: all shell commands except `pnpm typecheck`/`lint`/`build`/`exec`
+and `ls` are denied, `~/.claude/CLAUDE.md` is not loaded, and the run is killed
+after `NNX_AI_TIMEOUT` seconds.
+
+### Step 10: Verifies
+
+Runs `pnpm typecheck && pnpm lint && pnpm build` itself and exits non-zero if any
+fail. Review what opencode changed with `git diff`.
 
 > Neither the Better Auth schema nor the Kysely types are generated at scaffold time — both need a **live database** (the Better Auth `pg` adapter introspects the DB to diff the schema, and `kysely-codegen` reads it). They run as post-setup steps once Postgres is up (`pnpm auth:generate`, then `pnpm db:codegen`).
 
@@ -163,11 +192,11 @@ Creates `api/auth/[...all]/route.ts`:
 
 After the script completes:
 
-1. **Start the local services** (Postgres, Redis, Mailpit) — `--wait` blocks until healthy
+1. **Start the local services** (Postgres, Redis, Mailpit). This blocks until healthy
 
    ```bash
    cd <app-name>
-   docker compose -f docker/compose.dev.yml --env-file .env up -d --wait
+   pnpm docker
    ```
 
 2. **Generate the Better Auth schema** into `migrations/current.sql` (needs the DB running)
@@ -176,26 +205,33 @@ After the script completes:
    pnpm auth:generate
    ```
 
-3. **Apply the migration** to your dev database
+3. **Make the migration re-runnable**. graphile-migrate re-executes
+   `current.sql` on every change and again at commit, and the CLI's plain
+   `create table` fails the second time with `42P07`
+
+   ```bash
+   perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
+   ```
+
+4. **Apply the migration** and **generate Kysely types** from the database
 
    ```bash
    pnpm db:watch --once
-   ```
-
-   When the schema is stable, freeze it as a committed migration with `pnpm db:commit`,
-   then apply committed migrations in other environments with `pnpm db:migrate`.
-
-4. **Generate Kysely types** from the database
-
-   ```bash
    pnpm db:codegen
    ```
 
-5. **Update environment variables** (if needed)
+5. **Freeze the auth schema** as `migrations/committed/000001.sql`. Apply committed
+   migrations in other environments with `pnpm db:migrate`
+
+   ```bash
+   pnpm db:commit
+   ```
+
+6. **Update environment variables** (if needed)
    - Add an OpenAI API key if using AI features
    - Update database credentials if not using the defaults
 
-6. **Start the development server**
+7. **Start the development server**
 
    ```bash
    pnpm dev
@@ -285,10 +321,10 @@ After running the script, your project includes:
 
 To modify the default setup, edit the script:
 
-- **Change shadcn base color**: Edit the `step_init_shadcn` function to add `--base-color` flag
+- **Change the shadcn design system**: pass `--preset <code>`
 - **Skip specific shadcn components**: Replace `--all` with specific component names in `step_init_shadcn`
 - **Add/remove dependencies**: Edit the `pnpm add` lists in `step_install_deps` / `step_install_dev_deps`
-- **Customize Better Auth**: Edit the generated `auth.ts` and `lib/auth-client.ts` files
+- **Customize Better Auth**: Edit the `ai_prompt` heredoc in the script (describe what you want, not the code), or edit the generated `auth.ts` and `lib/auth-client.ts` afterwards
 - **Change the database schema**: Edit `migrations/current.sql`, run `pnpm db:watch`, then `pnpm db:codegen`
 - **Pin a version**: There are no version variables any more. Prefer not to add one — the last set of pins caused more breakage than they prevented (see the note in Step 2). If a `latest` genuinely breaks, verify it against the registry rather than assuming, and pin the narrowest thing that fixes it
 

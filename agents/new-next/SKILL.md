@@ -17,7 +17,8 @@ database itself is the user's step — see step 7.
 
 Confirm the app name and target directory, and resolve them into one
 **absolute path** before running anything. If the user hasn't said where, ask
-rather than guessing.
+rather than guessing. Ask for the shadcn preset code in the same breath — step
+3 needs it, and one question beats two interruptions.
 
 Check prerequisites early:
 
@@ -102,16 +103,62 @@ cosmetic when it appears — the scaffold builds and runs through it.
 
 ### 3. Initialize shadcn/ui
 
+**Ask for the preset before running anything.** A preset carries the whole
+design system — style, base color, icon library, fonts, menu colors — so it
+has to be chosen at `init` time; there is no flag that retrofits one onto an
+initialized project. Ask plainly:
+
+> Do you have a shadcn preset code? (from the theme builder, e.g. `b1f3nwcmmG`)
+
+Accept the answer in **either** form the user gives it and normalize to the
+bare code:
+
+| They say                | You use                |
+| ----------------------- | ---------------------- |
+| `--preset b1f3nwcmmG`   | `b1f3nwcmmG`           |
+| `b1f3nwcmmG`            | `b1f3nwcmmG`           |
+| `-p b1f3nwcmmG`         | `b1f3nwcmmG`           |
+| a preset name (`nova`)  | `nova`                 |
+
+Strip a leading `--preset` / `-p`, any `=`, and surrounding quotes. Don't
+re-prefix it — `--preset --preset b1f3nwcmmG` is a parse error, and pasting
+the flag form is the likelier of the two.
+
+With a preset:
+
+```bash
+cd /absolute/path/to/<app-name> && pnpm dlx shadcn@latest init --preset <code> --template next --pointer
+cd /absolute/path/to/<app-name> && pnpm dlx shadcn@latest add --all
+```
+
+Without one — the user has no code, or doesn't want to pick — fall back to
+the built-in default and say you did:
+
 ```bash
 cd /absolute/path/to/<app-name> && pnpm dlx shadcn@latest init --defaults
 cd /absolute/path/to/<app-name> && pnpm dlx shadcn@latest add --all
 ```
+
+`--defaults` **is** `--template=next --preset=nova`, so the two commands are
+the same shape and only the design system differs. That is also why
+`--template next` is safe here: it names the template `init` would configure
+anyway, and does **not** re-scaffold over the app step 1 already created —
+`init` only generates a project when given `--name`.
+
+`--pointer` adds `cursor: pointer` to buttons in `app/globals.css`. It is on
+by default in this scaffold; pass `--no-pointer` if the user asks for the
+browser default.
 
 Must be `cd <abs-path> && pnpm dlx …` (or shadcn's own `--cwd` flag) —
 `pnpm --dir <path> dlx` does **not** set the directory for the dlx'd binary,
 and shadcn, not finding a project in the shell's cwd, starts prompting for a
 new one. `--all` installs ~60 components; chatty and slow on a cold cache is
 normal. If the user wants a lean install, name the components instead.
+
+Check `components.json` after `init` to confirm the preset landed — a preset
+writes a non-default `style` (e.g. `base-luma`), `iconLibrary`, and
+`menuColor` / `menuAccent`. All-defaults values there mean the code was
+ignored, not applied.
 
 `init` also adds `@base-ui/react`, `@shadcn/react`, and `shadcn` itself as
 dependencies — that's the Radix → Base UI migration, not a failure worth
@@ -471,8 +518,10 @@ first — check there before improvising.
 The stack is opinionated, not mandatory:
 
 - **Fewer shadcn components** — name them instead of `--all`
-- **A different base color** — `shadcn init --base-color <color>` instead of
-  `--defaults`
+- **A different design system** — a different `--preset <code>`, or
+  `--defaults` for stock nova. There is no `--base-color` flag any more;
+  `--base` now selects the component library (`base`, `radix`, `aria`)
+- **Browser-default cursors** — `--no-pointer` instead of `--pointer`
 - **Extra Better Auth plugins** — add to both `auth.ts` and
   `lib/auth-client.ts`, then re-run `pnpm auth:generate` (it diffs against the
   live database, so only the new plugin's tables appear), apply step 8b's
