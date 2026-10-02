@@ -15,6 +15,10 @@ DRY_RUN=false
 NO_AI=false
 STEP_NUM=0
 
+# Database/auth layer the project is scaffolded around: kysely (default,
+# graphile-migrate) or prisma/drizzle with their own toolchains.
+PROVIDER="kysely"
+
 # Headless opencode run that writes the version-sensitive auth code.
 AI_MODEL="${NNX_MODEL:-opencode-go/deepseek-v4-pro}"
 AI_TIMEOUT="${NNX_AI_TIMEOUT:-1000}"
@@ -39,11 +43,12 @@ print_usage() {
 Usage: $PROG [flags] <app-name>
 
 Flags:
-  --preset <code>  shadcn preset code from the theme builder (default: $PRESET)
-  --no-ai          Skip the opencode step that writes the auth code
-  --dry-run        Print what would be executed without running anything
-  -v, --version    Show version
-  --help           Show this help message
+  --preset <code>     shadcn preset code from the theme builder (default: $PRESET)
+  --provider <db>     database/auth layer: kysely (default), prisma or drizzle
+  --no-ai             Skip the opencode step that writes the auth code
+  --dry-run           Print what would be executed without running anything
+  -v, --version       Show version
+  --help              Show this help message
 
 Environment:
   NNX_MODEL        opencode model (default: $AI_MODEL)
@@ -52,6 +57,7 @@ Environment:
 
 Examples:
   $PROG my-app
+  $PROG --provider prisma my-app
   $PROG --preset b1f3nwcmmG my-app
   $PROG --dry-run my-app
 
@@ -141,12 +147,21 @@ step_create_app() {
 
 step_install_dev_deps() {
   step "Install dev dependencies"
-  run_cmd pnpm add -D \
-    concurrently \
-    rimraf \
-    graphile-migrate \
-    kysely-codegen \
-    @types/pg
+  local deps=(concurrently rimraf)
+  case "$PROVIDER" in
+    kysely)
+      deps+=(graphile-migrate kysely-codegen @types/pg)
+      ;;
+    prisma)
+      # The `prisma` CLI's latest dist-tag is an 8.0.0 RC while @prisma/client's
+      # is 7.x; pin the toolchain to 7 so the CLI and the client stay one major.
+      deps+=(prisma@^7 @types/pg)
+      ;;
+    drizzle)
+      deps+=(drizzle-kit @types/pg)
+      ;;
+  esac
+  run_cmd pnpm add -D "${deps[@]}"
 }
 
 step_install_deps() {
@@ -154,18 +169,23 @@ step_install_deps() {
   # Nothing here is pinned. The apiKey plugin ships as its own package
   # (@better-auth/api-key) rather than in the better-auth barrel export, so it is
   # installed alongside better-auth instead of being pulled from it.
-  run_cmd pnpm add \
-    @ai-sdk/react \
-    @ai-sdk/openai \
-    @better-fetch/fetch \
-    ai \
-    better-auth \
-    @better-auth/api-key \
-    date-fns \
-    dotenv \
-    jotai \
-    kysely \
-    pg
+  local deps=(
+    @ai-sdk/react
+    @ai-sdk/openai
+    @better-fetch/fetch
+    ai
+    better-auth
+    @better-auth/api-key
+    date-fns
+    dotenv
+    jotai
+  )
+  case "$PROVIDER" in
+    kysely) deps+=(kysely pg) ;;
+    prisma) deps+=(@prisma/client@^7 @prisma/adapter-pg@^7 pg) ;;
+    drizzle) deps+=(drizzle-orm pg) ;;
+  esac
+  run_cmd pnpm add "${deps[@]}"
 }
 
 step_init_shadcn() {
@@ -177,10 +197,12 @@ step_init_shadcn() {
 
 step_create_dirs() {
   step "Create directories"
-  run_cmd mkdir -p \
-    migrations/committed \
-    docker \
-    lib
+  local dirs=(docker lib)
+  case "$PROVIDER" in
+    kysely) dirs+=(migrations/committed) ;;
+    prisma) dirs+=(prisma) ;;
+  esac
+  run_cmd mkdir -p "${dirs[@]}"
 }
 
 step_generate_docker_compose() {
@@ -245,7 +267,15 @@ step_generate_env() {
 
   local secret password="password"
   secret=$(openssl rand -base64 32 2>/dev/null || echo "replacewithyourverysecretstring")
-  local pg="postgresql://postgres:$password@localhost:5432"
+  # Prisma's engine resolves "localhost" to ::1 first and Postgres in Docker
+  # listens on IPv4 only, so it gets the address instead of the name.
+  local db_host="localhost"
+  [[ "$PROVIDER" == prisma ]] && db_host="127.0.0.1"
+  local pg="postgresql://postgres:$password@$db_host:5432"
+  local db_extra=""
+  if [[ "$PROVIDER" == kysely ]]; then
+    db_extra="$(printf '\n# graphile-migrate uses a shadow DB (commit) and a root/maintenance DB (reset).\n# All three connection strings must differ, so root points at the default template1.\nSHADOW_DATABASE_URL=%s/postgres_shadow\nROOT_DATABASE_URL=%s/template1' "$pg" "$pg")"
+  fi
 
   run_write .env <<EOL
 BETTER_AUTH_TELEMETRY=0
@@ -253,12 +283,7 @@ BETTER_AUTH_SECRET=$secret
 BETTER_AUTH_URL=http://localhost:3000
 
 POSTGRES_PASSWORD=$password
-DATABASE_URL=$pg/postgres
-
-# graphile-migrate uses a shadow DB (commit) and a root/maintenance DB (reset).
-# All three connection strings must differ, so root points at the default template1.
-SHADOW_DATABASE_URL=$pg/postgres_shadow
-ROOT_DATABASE_URL=$pg/template1
+DATABASE_URL=$pg/postgres$db_extra
 
 # For mailpit
 SMTP_USER="mailpit"
@@ -269,8 +294,10 @@ EOL
 }
 
 step_generate_db_files() {
-  step "Generate Kysely + graphile-migrate files"
+  step "Generate database files ($PROVIDER)"
 
+  case "$PROVIDER" in
+    kysely)
   run_write lib/db.ts <<EOL
 import { Kysely, PostgresDialect } from 'kysely';
 import { Pool } from 'pg';
@@ -335,6 +362,121 @@ module.exports = {
 EOL
 
   run_write migrations/committed/.gitkeep </dev/null
+      ;;
+
+    prisma)
+  run_write prisma/schema.prisma <<EOL
+generator client {
+  provider   = "prisma-client"
+  engineType = "client"
+  output     = "../lib/prisma/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+EOL
+
+  # Prisma 7 moved the connection URL out of the schema; the CLI reads it here.
+  run_write prisma.config.ts <<EOL
+import 'dotenv/config';
+import { defineConfig, env } from 'prisma/config';
+
+export default defineConfig({
+  schema: 'prisma/schema.prisma',
+  datasource: {
+    url: env('DATABASE_URL'),
+  },
+});
+EOL
+
+  run_write lib/prisma.ts <<EOL
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from './prisma/generated/client';
+
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  throw new Error('DATABASE_URL environment variable is not set');
+}
+
+const adapter = new PrismaPg({ connectionString });
+
+const prismaClientSingleton = () => new PrismaClient({ adapter });
+
+type PrismaClientSingleton = ReturnType<typeof prismaClientSingleton>;
+
+declare global {
+  // \`var\` is required here: let/const don't create properties on globalThis,
+  // so the singleton below wouldn't survive a hot reload.
+  var prisma: PrismaClientSingleton | undefined;
+}
+
+const prisma = global.prisma ?? prismaClientSingleton();
+
+if (process.env.NODE_ENV !== 'production') {
+  global.prisma = prisma;
+}
+
+export { prisma };
+export type PrismaInstance = typeof prisma;
+EOL
+
+  # The generated client is build output, and the auth-code step imports it, so
+  # generate it once before any typecheck runs.
+  run_cmd sh -c "grep -q 'lib/prisma/generated' .gitignore || echo '**/lib/prisma/generated' >> .gitignore"
+  run_cmd pnpm exec prisma generate
+      ;;
+
+    drizzle)
+  run_write lib/db.ts <<EOL
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  throw new Error('DATABASE_URL environment variable is not set');
+}
+
+declare global {
+  // \`var\` is required here: let/const don't create properties on globalThis,
+  // so the singleton below wouldn't survive a hot reload.
+  var db: ReturnType<typeof drizzle> | undefined;
+}
+
+const db = global.db ?? drizzle(new Pool({ connectionString }));
+
+if (process.env.NODE_ENV === 'development') {
+  global.db = db;
+}
+
+export { db };
+EOL
+
+  run_write drizzle.config.ts <<EOL
+import 'dotenv/config';
+import { defineConfig } from 'drizzle-kit';
+
+export default defineConfig({
+  schema: './lib/auth-schema.ts',
+  out: './drizzle',
+  dialect: 'postgresql',
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+});
+EOL
+
+  # Filled by \`pnpm auth:generate\` after the database is up; the empty module
+  # keeps typecheck green before that.
+  run_write lib/auth-schema.ts <<EOL
+// Generated by \`pnpm auth:generate\`. Extend this file with your own tables and
+// keep drizzle.config.ts pointing at it.
+export {};
+EOL
+      ;;
+  esac
 }
 
 step_add_package_scripts() {
@@ -346,15 +488,44 @@ step_add_package_scripts() {
   # gitignored .next/, so typecheck works before the first dev/build.
   # The auth CLI pulls @prisma/client and better-sqlite3, whose build scripts the
   # generated pnpm-workspace.yaml denies; on pnpm 11+ that aborts the dlx install
-  # with ERR_PNPM_IGNORED_BUILDS unless each is allowed here.
+  # with ERR_PNPM_IGNORED_BUILDS unless each is allowed here. The CLI bundles
+  # every adapter, so the flags do not vary with --provider.
+  local db_scripts=()
+  case "$PROVIDER" in
+    kysely)
+      db_scripts=(
+        "scripts.db:watch=graphile-migrate watch"
+        "scripts.db:migrate=graphile-migrate migrate"
+        "scripts.db:commit=graphile-migrate commit"
+        "scripts.db:reset=graphile-migrate reset"
+        "scripts.db:codegen=kysely-codegen --dialect postgres --exclude-pattern graphile_migrate.* --out-file lib/db-types.ts"
+        "scripts.auth:generate=pnpm dlx --allow-build=@prisma/client --allow-build=better-sqlite3 @better-auth/cli@latest generate --yes --output migrations/current.sql"
+      )
+      ;;
+    prisma)
+      db_scripts=(
+        "scripts.db:generate=prisma generate"
+        # --name keeps it non-interactive: without it prisma prompts and hangs
+        # when stdin is not a TTY (CI, agents, first run).
+        "scripts.db:migrate=prisma migrate dev --name init"
+        "scripts.db:deploy=prisma migrate deploy"
+        "scripts.db:studio=prisma studio"
+        "scripts.auth:generate=pnpm dlx --allow-build=@prisma/client --allow-build=better-sqlite3 @better-auth/cli@latest generate --yes"
+      )
+      ;;
+    drizzle)
+      db_scripts=(
+        "scripts.db:generate=drizzle-kit generate"
+        "scripts.db:migrate=drizzle-kit migrate"
+        "scripts.db:push=drizzle-kit push"
+        "scripts.db:studio=drizzle-kit studio"
+        "scripts.auth:generate=pnpm dlx --allow-build=@prisma/client --allow-build=better-sqlite3 @better-auth/cli@latest generate --yes --output lib/auth-schema.ts"
+      )
+      ;;
+  esac
   run_cmd npm pkg set \
     "scripts.typecheck=next typegen && tsc --noEmit" \
-    "scripts.db:watch=graphile-migrate watch" \
-    "scripts.db:migrate=graphile-migrate migrate" \
-    "scripts.db:commit=graphile-migrate commit" \
-    "scripts.db:reset=graphile-migrate reset" \
-    "scripts.db:codegen=kysely-codegen --dialect postgres --exclude-pattern graphile_migrate.* --out-file lib/db-types.ts" \
-    "scripts.auth:generate=pnpm dlx --allow-build=@prisma/client --allow-build=better-sqlite3 @better-auth/cli@latest generate --yes --output migrations/current.sql" \
+    "${db_scripts[@]}" \
     "scripts.docker=$compose up -d --wait" \
     "scripts.docker:stop=$compose stop" \
     "scripts.docker:down=$compose down" \
@@ -377,10 +548,18 @@ step_pin_toolchain() {
     "devEngines.runtime={\"name\":\"node\",\"version\":\"$NODE_VERSION\",\"onFail\":\"download\"}" \
     "devEngines.packageManager={\"name\":\"pnpm\",\"version\":\"$PNPM_VERSION\",\"onFail\":\"download\"}"
   run_write .nvmrc <<<"$NODE_VERSION"
+  # Provider packages with build scripts have to be allowed here, or pnpm 11+
+  # fails the install. sharp/unrs-resolver stay denied because Next.js does not
+  # need their native builds for this setup.
+  local allow_extra=""
+  case "$PROVIDER" in
+    prisma) allow_extra=$'\n  prisma: true\n  "@prisma/client": true\n  "@prisma/engines": true' ;;
+    drizzle) allow_extra=$'\n  esbuild: true' ;;
+  esac
   run_write pnpm-workspace.yaml <<EOL
 allowBuilds:
   sharp: false
-  unrs-resolver: false
+  unrs-resolver: false$allow_extra
 EOL
 }
 
@@ -421,8 +600,35 @@ points at the docs bundled with the installed Next.js.
 
 1. `auth.ts` at the project root (the route handler imports it as `@/auth`): a
    Better Auth server instance with
+EOL
+  case "$PROVIDER" in
+    kysely)
+      cat <<'EOL'
    - database: a `pg` Pool built from `process.env.DATABASE_URL`, passed directly
      (not the Kysely instance in `lib/db.ts`)
+EOL
+      ;;
+    prisma)
+      cat <<'EOL'
+   - database: the Prisma adapter. Import the singleton from `lib/prisma.ts` (a
+     client generated to `lib/prisma/generated/client`, wired with
+     `@prisma/adapter-pg`) and pass it through the Prisma adapter the installed
+     better-auth exports; read its types for the exact call shape. The auth
+     tables land in `prisma/schema.prisma` later via `pnpm auth:generate`, so do
+     not import anything that does not exist yet.
+EOL
+      ;;
+    drizzle)
+      cat <<'EOL'
+   - database: the Drizzle adapter. Import `db` from `lib/db.ts` (drizzle over
+     node-postgres) and the schema namespace from `lib/auth-schema.ts` (an empty
+     module until `pnpm auth:generate` fills it), and pass both through the
+     Drizzle adapter the installed better-auth exports; read its types for the
+     exact call shape.
+EOL
+      ;;
+  esac
+  cat <<'EOL'
    - email and password sign-in enabled, with automatic sign-in after sign-up
    - plugins: admin (default role `MEMBER`), API key, anonymous. Some plugins ship
      as separate `@better-auth/<name>` packages instead of the `better-auth/plugins`
@@ -439,17 +645,38 @@ points at the docs bundled with the installed Next.js.
    Fix failures in generated or vendored files with narrow per-file override
    blocks appended as the LAST entries of the config array (flat config is
    last-match-wins; an override placed before the Next presets does nothing).
-   Expected cases: `.gmrc.js` must use `require()` because graphile-migrate loads
-   it as CommonJS; shadcn files in `components/ui/**` and `hooks/**` are vendored
-   and may trip react-hooks rules. Turn off only the rules that actually fire,
-   only for those files.
+   Expected cases: a CommonJS tooling config the lint rules reject (under
+   graphile-migrate that is `.gmrc.js`, which must use `require()`), and shadcn
+   files in `components/ui/**` and `hooks/**`, which are vendored and may trip
+   react-hooks rules. Turn off only the rules that actually fire, only for
+   those files.
 
 ## Do not
 
 - Add, remove, upgrade or downgrade any package, or run `pnpm add`,
   `pnpm install`, `pnpm update` or `pnpm dlx`.
+EOL
+  case "$PROVIDER" in
+    kysely)
+      cat <<'EOL'
 - Edit `components/ui/**`, `hooks/**`, `lib/db.ts`, `lib/db-types.ts`,
   `.gmrc.js`, `.env`, `docker/**` or `package.json`.
+EOL
+      ;;
+    prisma)
+      cat <<'EOL'
+- Edit `components/ui/**`, `hooks/**`, `lib/prisma.ts`, `prisma/schema.prisma`,
+  `prisma.config.ts`, `.env`, `docker/**` or `package.json`.
+EOL
+      ;;
+    drizzle)
+      cat <<'EOL'
+- Edit `components/ui/**`, `hooks/**`, `lib/db.ts`, `drizzle.config.ts`,
+  `lib/auth-schema.ts`, `.env`, `docker/**` or `package.json`.
+EOL
+      ;;
+  esac
+  cat <<'EOL'
 - Disable a lint rule project-wide or add broad `ignores`.
 - Start a dev server or a database.
 
@@ -514,6 +741,15 @@ while [[ $# -gt 0 ]]; do
       PRESET="${1#--preset=}"
       shift
       ;;
+    --provider)
+      [[ -n "${2:-}" && "${2:-}" != --* ]] || die "--provider needs a value"
+      PROVIDER="$2"
+      shift 2
+      ;;
+    --provider=*)
+      PROVIDER="${1#--provider=}"
+      shift
+      ;;
     --no-ai)
       NO_AI=true
       shift
@@ -545,6 +781,11 @@ done
 
 [[ -z "$APP_NAME" ]] && die "Missing required argument: <app-name>"
 
+case "$PROVIDER" in
+  kysely | prisma | drizzle) ;;
+  *) die "--provider must be kysely, prisma or drizzle (got '$PROVIDER')" ;;
+esac
+
 # --- Execute ----------------------------------------------------------------
 
 check_prereqs
@@ -568,7 +809,8 @@ if $NO_AI; then
 
 Skipped the opencode step (--no-ai). Still to write by hand:
   auth.ts, lib/auth-client.ts, app/api/auth/[...all]/route.ts,
-  and ESLint overrides for .gmrc.js and the shadcn files (pnpm lint fails until then).
+  and ESLint overrides for the tooling config and the shadcn files (pnpm lint
+  fails until then).
 EOF
 else
   step_wire_auth
@@ -583,14 +825,18 @@ Done! Next steps:
 
   # 1. Start Postgres, Redis, and Mailpit (waits until healthy)
   pnpm docker
+EOF
+
+if [[ "$PROVIDER" == kysely ]]; then
+  cat <<'EOL'
 
   # 2. Generate the Better Auth schema into migrations/current.sql
   #    (needs the database running — the pg adapter introspects it)
   pnpm auth:generate
 
   # 3. Make it re-runnable: graphile-migrate re-executes current.sql on every
-  #    change and again at commit, and plain \`create table\` fails the second time
-  perl -i -pe 's/^create ((?:unique )?index|table) /create \$1 if not exists /' migrations/current.sql
+  #    change and again at commit, and plain `create table` fails the second time
+  perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
 
   # 4. Apply the migration, then generate Kysely types from the database
   pnpm db:watch --once
@@ -599,6 +845,36 @@ Done! Next steps:
   # 5. Freeze the auth schema as migration 000001, then start the dev server
   pnpm db:commit
   pnpm dev
+EOL
+elif [[ "$PROVIDER" == prisma ]]; then
+  cat <<'EOL'
+
+  # 2. Add the Better Auth tables to prisma/schema.prisma
+  #    (needs the database running — the CLI checks the schema against it)
+  pnpm auth:generate
+
+  # 3. Create the database and apply the migration
+  pnpm db:migrate
+
+  # 4. Start the dev server
+  pnpm dev
+EOL
+else
+  cat <<'EOL'
+
+  # 2. Generate the Better Auth drizzle schema into lib/auth-schema.ts
+  pnpm auth:generate
+
+  # 3. Generate and apply the migration
+  pnpm db:generate
+  pnpm db:migrate
+
+  # 4. Start the dev server
+  pnpm dev
+EOL
+fi
+
+cat <<'EOL'
 
 Other docker scripts: pnpm docker:ps, docker:logs, docker:stop, docker:down.
-EOF
+EOL
