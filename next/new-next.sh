@@ -8,7 +8,7 @@ set -euo pipefail
 
 # --- Defaults ---------------------------------------------------------------
 
-VERSION="4.0.0"
+VERSION="4.1.0"
 APP_NAME=""
 PRESET="b1oVxsfY"
 DRY_RUN=false
@@ -18,6 +18,12 @@ STEP_NUM=0
 # Headless opencode run that writes the version-sensitive auth code.
 AI_MODEL="${NNX_MODEL:-opencode-go/deepseek-v4-pro}"
 AI_TIMEOUT="${NNX_AI_TIMEOUT:-1000}"
+
+# Node release line the project runs on: "lts" or "latest". Resolved to exact
+# versions at scaffold time and written to devEngines, which pnpm downloads.
+NODE_CHANNEL="${NNX_NODE:-lts}"
+NODE_VERSION=""
+PNPM_VERSION=""
 
 # Invocation name, so help/version text matches how the script was actually
 # called — "./new-next.sh" when run directly, "nnx" when run via a symlink.
@@ -42,6 +48,7 @@ Flags:
 Environment:
   NNX_MODEL        opencode model (default: $AI_MODEL)
   NNX_AI_TIMEOUT   Seconds before the opencode step is killed (default: $AI_TIMEOUT)
+  NNX_NODE         Node release line for the project: lts or latest (default: $NODE_CHANNEL)
 
 Examples:
   $PROG my-app
@@ -80,9 +87,30 @@ step() {
 
 # --- Step functions ---------------------------------------------------------
 
+# Look up the newest Node (on NODE_CHANNEL) and pnpm releases.
+resolve_toolchain() {
+  [[ "$NODE_CHANNEL" == lts || "$NODE_CHANNEL" == latest ]] \
+    || die "NNX_NODE must be lts or latest (got '$NODE_CHANNEL')"
+  NODE_VERSION="$(NNX_NODE="$NODE_CHANNEL" node -e '
+fetch("https://nodejs.org/dist/index.json")
+  .then((r) => r.json())
+  .then((list) => {
+    const release = process.env.NNX_NODE === "lts" ? list.find((v) => v.lts) : list[0];
+    console.log(release.version.slice(1));
+  });
+' 2>/dev/null)" || true
+  PNPM_VERSION="$(npm view pnpm version 2>/dev/null)" || true
+  [[ -n "$NODE_VERSION" ]] || die "could not look up the $NODE_CHANNEL Node version"
+  [[ -n "$PNPM_VERSION" ]] || die "could not look up the latest pnpm version"
+  echo "Toolchain: Node $NODE_VERSION ($NODE_CHANNEL), pnpm $PNPM_VERSION"
+}
+
 check_prereqs() {
-  command -v pnpm >/dev/null 2>&1 || die "pnpm not found (npm i -g pnpm, or corepack enable)"
+  command -v node >/dev/null 2>&1 || die "node not found"
+  command -v pnpm >/dev/null 2>&1 || die "pnpm not found (npm i -g pnpm)"
   command -v docker >/dev/null 2>&1 || warn "docker not found; you'll need it for the post-setup steps"
+
+  resolve_toolchain
 
   if ! $NO_AI; then
     # Run the binary rather than checking it exists: a broken install passes
@@ -96,6 +124,8 @@ check_prereqs() {
 
 step_create_app() {
   step "Create Next.js app"
+  # --skip-install: the install would run on the global pnpm and leave a lockfile
+  # the pinned pnpm rejects. The first `pnpm add` installs everything instead.
   run_cmd pnpm create next-app "$APP_NAME" \
     --typescript \
     --eslint \
@@ -105,7 +135,8 @@ step_create_app() {
     --no-import-alias \
     --no-react-compiler \
     --no-src-dir \
-    --use-pnpm
+    --use-pnpm \
+    --skip-install
 }
 
 step_install_dev_deps() {
@@ -311,8 +342,10 @@ step_add_package_scripts() {
   # Every compose call needs --env-file .env; without it POSTGRES_PASSWORD
   # silently interpolates to an empty string, so the docker:* scripts carry it.
   local compose="docker compose -f docker/compose.dev.yml --env-file .env"
+  # next typegen writes the route types (LayoutProps, PageProps) into the
+  # gitignored .next/, so typecheck works before the first dev/build.
   run_cmd npm pkg set \
-    "scripts.typecheck=tsc --noEmit" \
+    "scripts.typecheck=next typegen && tsc --noEmit" \
     "scripts.db:watch=graphile-migrate watch" \
     "scripts.db:migrate=graphile-migrate migrate" \
     "scripts.db:commit=graphile-migrate commit" \
@@ -324,6 +357,28 @@ step_add_package_scripts() {
     "scripts.docker:down=$compose down" \
     "scripts.docker:ps=$compose ps -a" \
     "scripts.docker:logs=$compose logs -f"
+}
+
+step_pin_toolchain() {
+  step "Pin Node $NODE_VERSION and pnpm $PNPM_VERSION"
+  # pnpm reads devEngines, downloads both on first use and runs every later
+  # step on them, whatever is installed globally. npm refuses to touch a
+  # package.json whose devEngines.runtime doesn't match its own Node, so this
+  # runs after the last `npm pkg set`. create-next-app writes its own
+  # packageManager field, which Corepack prefers over devEngines, so it goes.
+  # It also writes pnpm-workspace.yaml in pnpm 10's format; pnpm 11+ reads
+  # build approvals from allowBuilds and fails the install on any build it
+  # isn't told about. .nvmrc keeps the shell's node in step.
+  run_cmd npm pkg delete packageManager
+  run_cmd npm pkg set --json \
+    "devEngines.runtime={\"name\":\"node\",\"version\":\"$NODE_VERSION\",\"onFail\":\"download\"}" \
+    "devEngines.packageManager={\"name\":\"pnpm\",\"version\":\"$PNPM_VERSION\",\"onFail\":\"download\"}"
+  run_write .nvmrc <<<"$NODE_VERSION"
+  run_write pnpm-workspace.yaml <<EOL
+allowBuilds:
+  sharp: false
+  unrs-resolver: false
+EOL
 }
 
 step_snapshot() {
@@ -491,6 +546,8 @@ step_create_app
 
 run_cmd cd "$APP_NAME" || die "Failed to cd into $APP_NAME"
 
+step_add_package_scripts
+step_pin_toolchain
 step_install_dev_deps
 step_install_deps
 step_init_shadcn
@@ -498,7 +555,6 @@ step_create_dirs
 step_generate_env
 step_generate_docker_compose
 step_generate_db_files
-step_add_package_scripts
 step_snapshot
 
 if $NO_AI; then

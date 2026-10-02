@@ -29,6 +29,7 @@ first. Help and version output adapt to the name you invoked it under.
 | ---------------- | ------------------------------ | --------------------------------- |
 | `NNX_MODEL`      | `opencode-go/deepseek-v4-pro`  | Model for the opencode step       |
 | `NNX_AI_TIMEOUT` | `1000`                         | Seconds before opencode is killed |
+| `NNX_NODE`       | `lts`                          | Node line: `lts` or `latest`      |
 
 The opencode step needs a working [opencode](https://opencode.ai) install and a
 provider for `NNX_MODEL` (the default uses an OpenCode Go subscription). If
@@ -57,10 +58,45 @@ Scaffolds a new Next.js project with:
 - No React Compiler
 - No src directory
 - Uses pnpm as package manager
+- Skips its own install (`--skip-install`; see Step 1b)
 
 Whatever version `create-next-app` installs is kept as-is. The script used to pin
 Next backwards afterwards; see the note under Core Dependencies for why it no
 longer does.
+
+### Step 1b: Pins Node and pnpm
+
+Before installing anything else, the script looks up the newest Node release on
+the `NNX_NODE` line (`lts` by default, or `latest`) and the newest pnpm, and
+writes both into `package.json`:
+
+```json
+"devEngines": {
+  "runtime":        { "name": "node", "version": "<x.y.z>", "onFail": "download" },
+  "packageManager": { "name": "pnpm", "version": "<x.y.z>", "onFail": "download" }
+}
+```
+
+pnpm downloads both on first use and runs every later step, and every `pnpm`
+command in the project, on them, whatever Node and pnpm are installed globally.
+Only `create-next-app` itself runs on your global versions, which is why it skips
+its install: a lockfile resolved by an older pnpm fails a newer one's checks.
+
+The step also removes the `packageManager` field `create-next-app` writes
+(Corepack would follow it instead of `devEngines`) and rewrites
+`pnpm-workspace.yaml` in pnpm 11+'s format. pnpm 11+ fails the install on any
+dependency build script it hasn't been told to allow or deny in `allowBuilds`,
+and skips releases younger than a day (`minimumReleaseAge`). The same Node version
+goes into `.nvmrc`, so a shell hook that reads it (nvm's, or fnm's
+`--use-on-cd`) switches the shell's `node` to match.
+
+The versions are fixed once the project exists. To move a project forward, edit
+`devEngines` and `.nvmrc`.
+
+> [!NOTE]
+> npm checks `devEngines.runtime` against its own Node and refuses to run
+> (`EBADDEVENGINES`) on a mismatch, so `npm pkg set` and other npm commands in
+> the project only work with the matching Node active. Use `pnpm pkg set`.
 
 ### Step 2: Installs Dependencies
 
@@ -149,9 +185,12 @@ Creates `.gmrc.js` (graphile-migrate config) that:
 
 ### Step 7: Adds package.json Scripts
 
-Adds via `npm pkg set`:
+Adds via `npm pkg set`. This runs right after `create-next-app`, before the pin
+in Step 1b, because npm refuses to edit the file once `devEngines.runtime` names
+a Node it isn't running on.
 
-- `typecheck`
+- `typecheck` (`next typegen && tsc --noEmit`; `next typegen` writes the
+  `LayoutProps`/`PageProps` route types into the gitignored `.next/`)
 - `db:watch`, `db:migrate`, `db:commit`, `db:reset`
 - `db:codegen` (excludes graphile-migrate's own tables from the `DB` type)
 - `auth:generate`
@@ -312,6 +351,7 @@ After running the script, your project includes:
 │   └── committed/                 # Committed migrations
 ├── auth.ts                        # Auth server config (pg Pool)
 ├── .gmrc.js                       # graphile-migrate config
+├── .nvmrc                         # Node version (same as devEngines.runtime)
 └── .env                           # Environment variables
 ```
 
