@@ -372,6 +372,12 @@ To modify the default setup, edit the script:
 
 - **shadcn init fails**: Ensure you have a compatible Node.js version
 - **`pnpm db:codegen` fails**: Ensure Postgres is running and migrations are applied (`docker compose ... up -d`, then `pnpm db:watch --once`); `kysely-codegen` needs a live database
+- **`pnpm auth:generate` fails with `ERR_PNPM_IGNORED_BUILDS`**: the Better Auth CLI
+  install pulls `@prisma/client` and `better-sqlite3`, and the generated
+  `pnpm-workspace.yaml` denies build scripts it was not told about, which pnpm 11+ treats
+  as an install error. The generated `auth:generate` script passes
+  `--allow-build=@prisma/client --allow-build=better-sqlite3`; if the CLI ever adds
+  another native dependency, allow it there too.
 - **graphile-migrate can't connect**: Check `DATABASE_URL` / `SHADOW_DATABASE_URL` / `ROOT_DATABASE_URL` in `.env` — all three must be **distinct** or graphile-migrate refuses to start
 - **`pnpm build` fails in `components/ui/calendar.tsx`**: `shadcn add --all` can pull a `react-day-picker` major (v10) the generated component isn't written for. Unrelated to the DB/auth setup — SWC compilation itself succeeds
 

@@ -344,6 +344,9 @@ step_add_package_scripts() {
   local compose="docker compose -f docker/compose.dev.yml --env-file .env"
   # next typegen writes the route types (LayoutProps, PageProps) into the
   # gitignored .next/, so typecheck works before the first dev/build.
+  # The auth CLI pulls @prisma/client and better-sqlite3, whose build scripts the
+  # generated pnpm-workspace.yaml denies; on pnpm 11+ that aborts the dlx install
+  # with ERR_PNPM_IGNORED_BUILDS unless each is allowed here.
   run_cmd npm pkg set \
     "scripts.typecheck=next typegen && tsc --noEmit" \
     "scripts.db:watch=graphile-migrate watch" \
@@ -351,7 +354,7 @@ step_add_package_scripts() {
     "scripts.db:commit=graphile-migrate commit" \
     "scripts.db:reset=graphile-migrate reset" \
     "scripts.db:codegen=kysely-codegen --dialect postgres --exclude-pattern graphile_migrate.* --out-file lib/db-types.ts" \
-    "scripts.auth:generate=pnpm dlx @better-auth/cli@latest generate --yes --output migrations/current.sql" \
+    "scripts.auth:generate=pnpm dlx --allow-build=@prisma/client --allow-build=better-sqlite3 @better-auth/cli@latest generate --yes --output migrations/current.sql" \
     "scripts.docker=$compose up -d --wait" \
     "scripts.docker:stop=$compose stop" \
     "scripts.docker:down=$compose down" \
@@ -394,7 +397,10 @@ step_snapshot() {
     return
   fi
   git check-ignore -q .env || echo '.env*' >> .gitignore
-  git add -A
+  # Pathspec limits staging to the scaffolded app. Without it, git 2.0+ stages
+  # the entire worktree, which commits unrelated changes when the script runs
+  # inside an existing repository.
+  git add -A .
   git commit -q -m "chore: scaffold installs and config" || warn "snapshot commit failed; continuing"
 }
 
