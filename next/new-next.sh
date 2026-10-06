@@ -8,19 +8,43 @@ set -euo pipefail
 
 # --- Defaults ---------------------------------------------------------------
 
-VERSION="4.1.0"
+VERSION="5.0.0"
 APP_NAME=""
-PRESET="b1oVxsfY"
 DRY_RUN=false
 NO_AI=false
+SETUP=false
 STEP_NUM=0
 
-# Database/auth layer the project is scaffolded around: kysely (default,
-# graphile-migrate) or prisma/drizzle with their own toolchains.
-PROVIDER="kysely"
+# Four choices shape the project. Each comes from its flag, else the config
+# file, else the built-in default below:
+#   provider  database/auth layer: kysely (graphile-migrate), prisma or drizzle
+#   ai        headless CLI that writes the version-sensitive auth code
+#   linter    what create-next-app sets up for `pnpm lint`
+#   preset    shadcn preset code from the theme builder
+PROVIDERS="kysely prisma drizzle"
+AIS="opencode claude codex"
+LINTERS="biome eslint"
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/new/config.yaml"
 
-# Headless opencode run that writes the version-sensitive auth code.
-AI_MODEL="${NNX_MODEL:-opencode-go/deepseek-v4-pro}"
+CFG_PROVIDER="kysely"
+CFG_AI="opencode"
+CFG_LINTER="biome"
+CFG_PRESET="b0"
+
+FLAG_PROVIDER=""
+FLAG_AI=""
+FLAG_LINTER=""
+FLAG_PRESET=""
+
+# Resolved once flags and config are read.
+PROVIDER=""
+AI=""
+LINTER=""
+PRESET=""
+
+# NNX_MODEL overrides the AI CLI's model. Empty means the CLI's own default,
+# except opencode, which has no usable default of its own.
+AI_MODEL="${NNX_MODEL:-}"
 AI_TIMEOUT="${NNX_AI_TIMEOUT:-1000}"
 
 # Node release line the project runs on: "lts" or "latest". Resolved to exact
@@ -41,23 +65,34 @@ warn() { echo "Warning: $1" >&2; }
 print_usage() {
   cat <<EOF
 Usage: $PROG [flags] <app-name>
+       $PROG --setup
 
-Flags:
-  --preset <code>     shadcn preset code from the theme builder (default: $PRESET)
-  --provider <db>     database/auth layer: kysely (default), prisma or drizzle
-  --no-ai             Skip the opencode step that writes the auth code
+Flags (each overrides the config file for this run only):
+  --provider <db>     database/auth layer: kysely, prisma or drizzle
+  --ai <cli>          CLI that writes the auth code: opencode, claude or codex
+  --linter <name>     biome or eslint
+  --preset <code>     shadcn preset code from the theme builder
+
+  --setup             Ask the questions again and rewrite the config file
+  --no-ai             Skip the AI step that writes the auth code
   --dry-run           Print what would be executed without running anything
   -v, --version       Show version
   --help              Show this help message
 
+Config: $CONFIG_FILE
+  Written on the first interactive run from your answers, read on every run
+  after. Without it (and without a terminal) the built-in defaults apply:
+  provider $CFG_PROVIDER, ai $CFG_AI, linter $CFG_LINTER, preset $CFG_PRESET.
+
 Environment:
-  NNX_MODEL        opencode model (default: $AI_MODEL)
-  NNX_AI_TIMEOUT   Seconds before the opencode step is killed (default: $AI_TIMEOUT)
+  NNX_MODEL        Model for the AI CLI (default: the CLI's own; opencode:
+                   $(default_model opencode))
+  NNX_AI_TIMEOUT   Seconds before the AI step is killed (default: $AI_TIMEOUT)
   NNX_NODE         Node release line for the project: lts or latest (default: $NODE_CHANNEL)
 
 Examples:
   $PROG my-app
-  $PROG --provider prisma my-app
+  $PROG --provider prisma --ai claude my-app
   $PROG --preset b1f3nwcmmG my-app
   $PROG --dry-run my-app
 
@@ -91,6 +126,148 @@ step() {
   echo "[Step $STEP_NUM] $1"
 }
 
+# True when $1 is one of the space-separated words in $2.
+is_one_of() {
+  local word
+  for word in $2; do
+    [[ "$1" == "$word" ]] && return 0
+  done
+  return 1
+}
+
+default_model() {
+  case "$1" in
+    # Same model as opencode-go/deepseek-v4-pro, whose route kept stopping
+    # runs with "blocked by the provider's content filter".
+    opencode) echo "openrouter/deepseek/deepseek-v4-pro" ;;
+    *) echo "" ;;
+  esac
+}
+
+# --- Config -----------------------------------------------------------------
+
+# Accepts a bare code or a pasted `--preset <code>` / `--preset=<code>`.
+normalize_preset() {
+  local value="$1"
+  value="${value#--preset=}"
+  value="${value#--preset}"
+  value="$(echo "$value" | tr -d '[:space:]')"
+  echo "$value"
+}
+
+valid_preset() {
+  local re='^[A-Za-z0-9_-]+$'
+  [[ "$1" =~ $re ]]
+}
+
+# Check one choice; $3 says where the value came from, for the error message.
+check_choice() {
+  local key="$1" value="$2" source="$3"
+  case "$key" in
+    provider) is_one_of "$value" "$PROVIDERS" || die "$source: provider must be one of: $PROVIDERS (got '$value')" ;;
+    ai) is_one_of "$value" "$AIS" || die "$source: ai must be one of: $AIS (got '$value')" ;;
+    linter) is_one_of "$value" "$LINTERS" || die "$source: linter must be one of: $LINTERS (got '$value')" ;;
+    preset) valid_preset "$value" || die "$source: preset must be a shadcn preset code (got '$value')" ;;
+  esac
+}
+
+# Flat `key: value` lines; `#` starts a comment. Returns 1 when there is no file.
+load_config() {
+  [[ -f "$CONFIG_FILE" ]] || return 1
+  local line key value n=0
+  local re='^[[:space:]]*([a-z]+)[[:space:]]*:[[:space:]]*(.*)$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1))
+    line="${line%%#*}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ $re ]] || die "$CONFIG_FILE:$n: expected 'key: value'"
+    key="${BASH_REMATCH[1]}"
+    value="$(echo "${BASH_REMATCH[2]}" | tr -d "[:space:]\"'")"
+    check_choice "$key" "$value" "$CONFIG_FILE:$n"
+    case "$key" in
+      provider) CFG_PROVIDER="$value" ;;
+      ai) CFG_AI="$value" ;;
+      linter) CFG_LINTER="$value" ;;
+      preset) CFG_PRESET="$value" ;;
+      *) die "$CONFIG_FILE:$n: unknown key '$key' (expected provider, ai, linter or preset)" ;;
+    esac
+  done <"$CONFIG_FILE"
+}
+
+# Ask until the answer is one of $3; Enter takes the default $2. Sets ANSWER.
+ask_choice() {
+  local label="$1" default="$2" options="$3" reply
+  while true; do
+    read -r -p "$label (${options// / / }) [$default]: " reply || die "no answer for: $label"
+    reply="${reply:-$default}"
+    if is_one_of "$reply" "$options"; then
+      ANSWER="$reply"
+      return
+    fi
+    echo "  Pick one of: $options" >&2
+  done
+}
+
+ask_config() {
+  echo "Choose the defaults for new projects. Press Enter to keep the value in brackets."
+  ask_choice "Database provider" "$CFG_PROVIDER" "$PROVIDERS"
+  CFG_PROVIDER="$ANSWER"
+  ask_choice "AI CLI for the auth code" "$CFG_AI" "$AIS"
+  CFG_AI="$ANSWER"
+  ask_choice "Linter" "$CFG_LINTER" "$LINTERS"
+  CFG_LINTER="$ANSWER"
+  local reply
+  while true; do
+    read -r -p "shadcn preset code, or paste '--preset <code>' [$CFG_PRESET]: " reply \
+      || die "no answer for: shadcn preset"
+    reply="$(normalize_preset "$reply")"
+    reply="${reply:-$CFG_PRESET}"
+    if valid_preset "$reply"; then
+      CFG_PRESET="$reply"
+      break
+    fi
+    echo "  A preset code is letters, digits, '-' and '_' only" >&2
+  done
+}
+
+write_config() {
+  run_cmd mkdir -p "$(dirname "$CONFIG_FILE")"
+  run_write "$CONFIG_FILE" <<EOL
+# Defaults for $PROG. Edit this file, or run \`$PROG --setup\` to answer the
+# questions again. Flags (--provider, --ai, --linter, --preset) override it per run.
+provider: $CFG_PROVIDER   # $PROVIDERS
+ai: $CFG_AI   # $AIS
+linter: $CFG_LINTER   # $LINTERS
+preset: $CFG_PRESET   # shadcn preset code
+EOL
+  $DRY_RUN || echo "Saved $CONFIG_FILE"
+}
+
+# Flag, else config file, else built-in default.
+resolve_choices() {
+  if $SETUP; then
+    [[ -t 0 ]] || die "--setup needs a terminal to ask the questions"
+    load_config || true
+    ask_config
+    write_config
+  elif ! load_config; then
+    if [[ -t 0 ]] && ! $DRY_RUN; then
+      echo "No config at $CONFIG_FILE yet."
+      ask_config
+      write_config
+    else
+      warn "no config at $CONFIG_FILE; using the built-in defaults"
+    fi
+  fi
+
+  PROVIDER="${FLAG_PROVIDER:-$CFG_PROVIDER}"
+  AI="${FLAG_AI:-$CFG_AI}"
+  LINTER="${FLAG_LINTER:-$CFG_LINTER}"
+  PRESET="${FLAG_PRESET:-$CFG_PRESET}"
+  AI_MODEL="${AI_MODEL:-$(default_model "$AI")}"
+  echo "Using: provider $PROVIDER, ai $AI, linter $LINTER, preset $PRESET"
+}
+
 # --- Step functions ---------------------------------------------------------
 
 # Look up the newest Node (on NODE_CHANNEL) and pnpm releases.
@@ -121,8 +298,8 @@ check_prereqs() {
   if ! $NO_AI; then
     # Run the binary rather than checking it exists: a broken install passes
     # `command -v` and then dies on exec with no output.
-    if ! opencode --version >/dev/null 2>&1; then
-      warn "opencode is missing or won't run; continuing with --no-ai"
+    if ! "$AI" --version >/dev/null 2>&1; then
+      warn "$AI is missing or won't run; continuing with --no-ai"
       NO_AI=true
     fi
   fi
@@ -134,7 +311,7 @@ step_create_app() {
   # the pinned pnpm rejects. The first `pnpm add` installs everything instead.
   run_cmd pnpm create next-app "$APP_NAME" \
     --typescript \
-    --eslint \
+    "--$LINTER" \
     --tailwind \
     --app \
     --turbopack \
@@ -309,14 +486,11 @@ if (!connectionString) {
   throw new Error('DATABASE_URL environment variable is not set');
 }
 
-declare global {
-  // \`var\` is required here: let/const don't create properties on globalThis,
-  // so the singleton below wouldn't survive a hot reload.
-  var db: Kysely<DB> | undefined;
-}
+// Kept on globalThis in development so a hot reload reuses the pool.
+const globalForDb = globalThis as unknown as { db?: Kysely<DB> };
 
 const db =
-  global.db ||
+  globalForDb.db ??
   new Kysely<DB>({
     dialect: new PostgresDialect({
       pool: new Pool({ connectionString }),
@@ -324,7 +498,7 @@ const db =
   });
 
 if (process.env.NODE_ENV === 'development') {
-  global.db = db;
+  globalForDb.db = db;
 }
 
 export { db };
@@ -406,16 +580,13 @@ const prismaClientSingleton = () => new PrismaClient({ adapter });
 
 type PrismaClientSingleton = ReturnType<typeof prismaClientSingleton>;
 
-declare global {
-  // \`var\` is required here: let/const don't create properties on globalThis,
-  // so the singleton below wouldn't survive a hot reload.
-  var prisma: PrismaClientSingleton | undefined;
-}
+// Kept on globalThis outside production so a hot reload reuses the client.
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClientSingleton };
 
-const prisma = global.prisma ?? prismaClientSingleton();
+const prisma = globalForPrisma.prisma ?? prismaClientSingleton();
 
 if (process.env.NODE_ENV !== 'production') {
-  global.prisma = prisma;
+  globalForPrisma.prisma = prisma;
 }
 
 export { prisma };
@@ -439,16 +610,13 @@ if (!connectionString) {
   throw new Error('DATABASE_URL environment variable is not set');
 }
 
-declare global {
-  // \`var\` is required here: let/const don't create properties on globalThis,
-  // so the singleton below wouldn't survive a hot reload.
-  var db: ReturnType<typeof drizzle> | undefined;
-}
+// Kept on globalThis in development so a hot reload reuses the pool.
+const globalForDb = globalThis as unknown as { db?: ReturnType<typeof drizzle> };
 
-const db = global.db ?? drizzle(new Pool({ connectionString }));
+const db = globalForDb.db ?? drizzle(new Pool({ connectionString }));
 
 if (process.env.NODE_ENV === 'development') {
-  global.db = db;
+  globalForDb.db = db;
 }
 
 export { db };
@@ -458,13 +626,17 @@ EOL
 import 'dotenv/config';
 import { defineConfig } from 'drizzle-kit';
 
+const url = process.env.DATABASE_URL;
+
+if (!url) {
+  throw new Error('DATABASE_URL environment variable is not set');
+}
+
 export default defineConfig({
   schema: './lib/auth-schema.ts',
   out: './drizzle',
   dialect: 'postgresql',
-  dbCredentials: {
-    url: process.env.DATABASE_URL!,
-  },
+  dbCredentials: { url },
 });
 EOL
 
@@ -563,6 +735,25 @@ allowBuilds:
 EOL
 }
 
+step_configure_biome() {
+  step "Configure Biome"
+  # shadcn's vendored components trip recommended rules (a11y, noArrayIndexKey)
+  # that change with every shadcn and Biome release, so the linter skips them;
+  # the formatter still covers them.
+  run_cmd node -e '
+const fs = require("fs");
+const config = JSON.parse(fs.readFileSync("biome.json", "utf8"));
+config.overrides = [
+  ...(config.overrides ?? []),
+  { includes: ["components/ui/**"], linter: { enabled: false } },
+];
+fs.writeFileSync("biome.json", JSON.stringify(config, null, 2) + "\n");
+'
+  # `pnpm lint` is `biome check`, which fails on formatting too: shadcn writes
+  # no semicolons and the templates above use single quotes.
+  run_cmd pnpm exec biome check --write || warn "biome check --write left errors; pnpm lint will show them"
+}
+
 step_snapshot() {
   step "Commit scaffold snapshot"
   # Commits everything the installers and templates produced, so the AI step's
@@ -630,7 +821,9 @@ EOL
   esac
   cat <<'EOL'
    - email and password sign-in enabled, with automatic sign-in after sign-up
-   - plugins: admin (default role `MEMBER`), API key, anonymous. Some plugins ship
+   - plugins: admin, API key, anonymous, each with its default options (no
+     custom roles or default role; the admin plugin's own `user`/`admin` roles
+     apply). Some plugins ship
      as separate `@better-auth/<name>` packages instead of the `better-auth/plugins`
      barrel; the API key plugin is installed as `@better-auth/api-key`. Use
      whatever the installed packages actually export.
@@ -641,6 +834,9 @@ EOL
    installed client types define.
 3. `app/api/auth/[...all]/route.ts`: the App Router handler exposing GET and POST
    for the auth instance.
+EOL
+  if [[ "$LINTER" == eslint ]]; then
+    cat <<'EOL'
 4. `eslint.config.mjs`: `pnpm lint` must report zero errors and zero warnings.
    Fix failures in generated or vendored files with narrow per-file override
    blocks appended as the LAST entries of the config array (flat config is
@@ -650,11 +846,23 @@ EOL
    files in `components/ui/**` and `hooks/**`, which are vendored and may trip
    react-hooks rules. Turn off only the rules that actually fire, only for
    those files.
+EOL
+  else
+    cat <<'EOL'
+
+`pnpm lint` runs `biome check`, which also checks formatting. Format the files
+you write with `pnpm exec biome check --write <file>`, and fix any lint rule it
+reports in them. Do not edit `biome.json`.
+EOL
+  fi
+  cat <<'EOL'
 
 ## Do not
 
 - Add, remove, upgrade or downgrade any package, or run `pnpm add`,
   `pnpm install`, `pnpm update` or `pnpm dlx`.
+- Run `git`. The scaffold is already committed; your changes are reviewed with
+  `git diff` afterwards.
 EOL
   case "$PROVIDER" in
     kysely)
@@ -688,66 +896,156 @@ the files you changed.
 EOL
 }
 
-step_wire_auth() {
-  step "Wire Better Auth with opencode ($AI_MODEL)"
+# Builds AI_CMD: the headless command for $AI that runs prompt $1. Each CLI
+# gets the narrowest guardrail it supports, since none asks before acting.
+build_ai_command() {
+  local prompt="$1"
+  local model=()
+  case "$AI" in
+    opencode)
+      # Shell is open so the model can read with cat/grep/python as it likes;
+      # an allowlist only cost it turns on denied reads. Denied: changing
+      # packages (the prompt forbids it) and git (the snapshot commit is the
+      # baseline for `git diff`). The last matching rule wins. --auto approves
+      # anything not denied; doom_loop defaults to "ask", which --auto would approve.
+      local permission='{"bash":{"*":"allow","pnpm add*":"deny","pnpm install*":"deny","pnpm i *":"deny","pnpm update*":"deny","pnpm up*":"deny","pnpm remove*":"deny","pnpm rm*":"deny","pnpm dlx*":"deny","npm *":"deny","npx *":"deny","yarn*":"deny","git *":"deny"},"external_directory":"deny","doom_loop":"deny"}'
+      # OPENCODE_DISABLE_CLAUDE_CODE keeps ~/.claude/CLAUDE.md out of the run.
+      AI_CMD=(env OPENCODE_DISABLE_CLAUDE_CODE=1 "OPENCODE_PERMISSION=$permission"
+        opencode run --auto -m "$AI_MODEL" --title "nnx: wire $APP_NAME" "$prompt")
+      ;;
+    claude)
+      # dontAsk denies every tool not listed. --setting-sources project keeps
+      # the user's ~/.claude settings and CLAUDE.md out of the run.
+      [[ -n "$AI_MODEL" ]] && model=(--model "$AI_MODEL")
+      # --allowedTools takes every word up to `--`, so it goes last.
+      AI_CMD=(claude -p --permission-mode dontAsk --setting-sources project
+        ${model[@]+"${model[@]}"}
+        --allowedTools Read Edit Write Glob Grep
+        "Bash(pnpm typecheck *)" "Bash(pnpm lint *)" "Bash(pnpm build *)" "Bash(pnpm exec *)"
+        "Bash(pnpm typecheck)" "Bash(pnpm lint)" "Bash(pnpm build)" "Bash(ls *)"
+        -- "$prompt")
+      ;;
+    codex)
+      # codex has no command allowlist; the sandbox keeps writes inside the
+      # project. Network stays on because `pnpm build` downloads next/font
+      # files. --ignore-user-config keeps ~/.codex/config.toml out (auth still works).
+      [[ -n "$AI_MODEL" ]] && model=(-m "$AI_MODEL")
+      AI_CMD=(codex exec --sandbox workspace-write --ignore-user-config --skip-git-repo-check
+        -c sandbox_workspace_write.network_access=true
+        ${model[@]+"${model[@]}"} "$prompt")
+      ;;
+  esac
+}
 
-  # Deny every shell command except the checks the prompt asks for. --auto
-  # approves anything not denied, so this list is the guardrail. doom_loop
-  # defaults to "ask", which --auto would approve.
-  local permission='{"bash":{"*":"deny","pnpm typecheck*":"allow","pnpm lint*":"allow","pnpm build*":"allow","pnpm exec *":"allow","ls*":"allow"},"external_directory":"deny","doom_loop":"deny"}'
+# Runs the AI CLI on prompt $1 with a wall-clock cap.
+step_wire_auth() {
+  step "Wire Better Auth with $AI${AI_MODEL:+ ($AI_MODEL)}"
 
   if $DRY_RUN; then
-    echo "  > opencode run --auto -m $AI_MODEL --title 'nnx: wire $APP_NAME' <prompt>"
+    echo "  > $AI <headless flags> <prompt>"
     return
   fi
 
-  # OPENCODE_DISABLE_CLAUDE_CODE keeps ~/.claude/CLAUDE.md out of the run.
-  OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_PERMISSION="$permission" \
-    opencode run --auto -m "$AI_MODEL" --title "nnx: wire $APP_NAME" "$(ai_prompt)" </dev/null &
+  build_ai_command "$1"
+  "${AI_CMD[@]}" </dev/null &
   local pid=$!
 
-  # opencode run has no turn or spend limit, so cap the wall-clock time.
+  # None of the CLIs has a reliable turn or spend limit, so cap the time.
   local waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [[ $waited -ge $AI_TIMEOUT ]]; then
-      warn "opencode still running after ${AI_TIMEOUT}s; stopping it"
+      warn "$AI still running after ${AI_TIMEOUT}s; stopping it"
       kill "$pid" 2>/dev/null || true
       break
     fi
     sleep 1
     waited=$((waited + 1))
   done
-  # opencode's exit code isn't documented; the gate below is the real check.
+  # The CLIs' exit codes don't say whether the job got done; verify does.
   wait "$pid" || true
 }
 
-step_verify() {
-  step "Verify: typecheck, lint, build"
-  if ! { run_cmd pnpm typecheck && run_cmd pnpm lint && run_cmd pnpm build; }; then
-    die "verification failed. Review what opencode changed with: cd $APP_NAME && git diff"
+# The auth files must exist (typecheck passes without them, since nothing
+# imports them yet), then typecheck, lint and build must pass. Output goes to
+# stdout and to $1, so a retry can show the model what failed.
+run_checks() {
+  local log="$1" file missing=false
+  for file in auth.ts lib/auth-client.ts "app/api/auth/[...all]/route.ts"; do
+    if [[ ! -f "$file" ]]; then
+      echo "Missing $file" | tee -a "$log"
+      missing=true
+    fi
+  done
+  $missing && return 1
+  if [[ "$LINTER" == biome ]]; then
+    # The model's files get the same formatting pass as the scaffold's.
+    pnpm exec biome check --write >/dev/null 2>&1 || true
   fi
+  { pnpm typecheck && pnpm lint && pnpm build; } 2>&1 | tee -a "$log"
+}
+
+# Verify once; on failure, give the AI one more run with the failing output.
+step_verify() {
+  step "Verify: auth files, typecheck, lint, build"
+  if $DRY_RUN; then
+    echo "  > check auth.ts, lib/auth-client.ts, app/api/auth/[...all]/route.ts exist"
+    echo "  > pnpm typecheck && pnpm lint && pnpm build (one AI retry on failure)"
+    return
+  fi
+
+  local log
+  log="$(mktemp)"
+  run_checks "$log" && { rm -f "$log"; return; }
+
+  warn "checks failed; giving $AI one more run with the errors"
+  local retry_prompt
+  retry_prompt="$(ai_prompt)
+
+## Previous attempt failed
+
+A previous run left the project failing these checks. Fix the cause. The last
+lines of the output:
+
+\`\`\`
+$(tail -n 80 "$log")
+\`\`\`"
+  : >"$log"
+  step_wire_auth "$retry_prompt"
+  step "Verify again"
+  run_checks "$log" || { rm -f "$log"; die "verification failed twice. Review what $AI changed with: cd $APP_NAME && git diff"; }
+  rm -f "$log"
 }
 
 # --- Parse arguments --------------------------------------------------------
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --preset)
-      [[ -n "${2:-}" && "${2:-}" != --* ]] || die "--preset needs a code"
-      PRESET="$2"
-      shift 2
-      ;;
-    --preset=*)
-      PRESET="${1#--preset=}"
-      shift
-      ;;
-    --provider)
-      [[ -n "${2:-}" && "${2:-}" != --* ]] || die "--provider needs a value"
-      PROVIDER="$2"
-      shift 2
+    --provider | --ai | --linter | --preset)
+      [[ -n "${2:-}" && "${2:-}" != --* ]] || die "$1 needs a value"
+      set -- "$1=$2" "${@:3}"
       ;;
     --provider=*)
-      PROVIDER="${1#--provider=}"
+      FLAG_PROVIDER="${1#--provider=}"
+      check_choice provider "$FLAG_PROVIDER" "--provider"
+      shift
+      ;;
+    --ai=*)
+      FLAG_AI="${1#--ai=}"
+      check_choice ai "$FLAG_AI" "--ai"
+      shift
+      ;;
+    --linter=*)
+      FLAG_LINTER="${1#--linter=}"
+      check_choice linter "$FLAG_LINTER" "--linter"
+      shift
+      ;;
+    --preset=*)
+      FLAG_PRESET="${1#--preset=}"
+      check_choice preset "$FLAG_PRESET" "--preset"
+      shift
+      ;;
+    --setup)
+      SETUP=true
       shift
       ;;
     --no-ai)
@@ -779,14 +1077,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$APP_NAME" ]] && die "Missing required argument: <app-name>"
-
-case "$PROVIDER" in
-  kysely | prisma | drizzle) ;;
-  *) die "--provider must be kysely, prisma or drizzle (got '$PROVIDER')" ;;
-esac
+$SETUP || [[ -n "$APP_NAME" ]] || die "Missing required argument: <app-name>"
 
 # --- Execute ----------------------------------------------------------------
+
+resolve_choices
+if [[ -z "$APP_NAME" ]]; then
+  exit 0
+fi
 
 check_prereqs
 step_create_app
@@ -802,18 +1100,25 @@ step_create_dirs
 step_generate_env
 step_generate_docker_compose
 step_generate_db_files
+if [[ "$LINTER" == biome ]]; then
+  step_configure_biome
+fi
 step_snapshot
 
 if $NO_AI; then
   cat <<EOF
 
-Skipped the opencode step (--no-ai). Still to write by hand:
-  auth.ts, lib/auth-client.ts, app/api/auth/[...all]/route.ts,
+Skipped the AI step (--no-ai). Still to write by hand:
+  auth.ts, lib/auth-client.ts, app/api/auth/[...all]/route.ts
+EOF
+  if [[ "$LINTER" == eslint ]]; then
+    cat <<EOF
   and ESLint overrides for the tooling config and the shadcn files (pnpm lint
   fails until then).
 EOF
+  fi
 else
-  step_wire_auth
+  step_wire_auth "$(ai_prompt)"
   step_verify
 fi
 

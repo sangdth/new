@@ -147,9 +147,7 @@ export const auth = betterAuth({
   plugins: [
     apiKey(),
     anonymous(),
-    admin({
-      defaultRole: 'MEMBER',
-    }),
+    admin(),
   ],
 });
 EOL
