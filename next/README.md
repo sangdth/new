@@ -1,6 +1,6 @@
 # new-next.sh — Next.js Scaffolding Script
 
-Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Better Auth, the Vercel AI SDK, and Jotai — plus a local Docker stack (Postgres, Redis, Mailpit). The database layer is chosen with `--provider`: Kysely + graphile-migrate (default), Prisma, or Drizzle.
+Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Better Auth, the Vercel AI SDK, and Jotai — plus a local Docker stack (Postgres, Redis, Mailpit). Four choices shape the project — database layer (Kysely + graphile-migrate, Prisma or Drizzle), the AI CLI that writes the auth code (opencode, Claude Code or Codex), linter (Biome or ESLint) and shadcn preset — and are saved once in a [config file](#config-file).
 
 > Installation and symlink setup live in the [root README](../README.md#installation).
 
@@ -9,37 +9,67 @@ Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Be
 ```bash
 ./new-next.sh [flags] <app-name>   # from this directory
 nnx [flags] <app-name>             # from anywhere, if symlinked
+nnx --setup                        # answer the config questions again
 ```
 
 The script creates the project as a subdirectory of your **current working
 directory**, not of the repo — so `cd` to wherever you want the project to live
 first. Help and version output adapt to the name you invoked it under.
 
+### Config file
+
+`${XDG_CONFIG_HOME:-~/.config}/new/config.yaml` holds your defaults:
+
+```yaml
+provider: kysely   # kysely | prisma | drizzle
+ai: opencode       # opencode | claude | codex
+linter: biome      # biome | eslint
+preset: b0         # shadcn preset code
+```
+
+- **First run:** if the file is missing and the script runs in a terminal, it
+  asks the four questions, saves the answers and carries on. The preset question
+  takes a bare code or a pasted `--preset <code>`; Enter keeps `b0` (shadcn's
+  stock `base-nova` / `neutral`).
+- **Later runs:** the file is read and nothing is asked. Edit it, or run
+  `--setup`, to change it.
+- **No terminal** (piped, CI) **or `--dry-run`:** nothing is asked or written;
+  the built-in defaults above apply.
+
+Each value is picked as: flag, else config file, else built-in default. Flags
+apply to one run and never change the file. A bad value or unknown key stops the
+script with the file and line number.
+
 ### Flags
 
-| Flag              | Description                                                      |
-| ----------------- | ---------------------------------------------------------------- |
-| `--preset <code>` | shadcn preset code from the theme builder (default: `b1oVxsfY`)  |
-| `--provider <db>` | Database/auth layer: `kysely` (default), `prisma` or `drizzle`    |
-| `--no-ai`         | Skip the opencode step that writes the auth code                 |
-| `--dry-run`       | Print what would be executed without running anything            |
-| `-v`, `--version` | Show version                                                     |
-| `--help`          | Show help message                                                |
+| Flag              | Description                                         |
+| ----------------- | --------------------------------------------------- |
+| `--provider <db>` | Database/auth layer: `kysely`, `prisma`, `drizzle`  |
+| `--ai <cli>`      | AI CLI: `opencode`, `claude`, `codex`               |
+| `--linter <name>` | `biome` or `eslint`                                 |
+| `--preset <code>` | shadcn preset code from the theme builder           |
+| `--setup`         | Ask the config questions again and rewrite the file |
+| `--no-ai`         | Skip the AI step that writes the auth code          |
+| `--dry-run`       | Print what would be executed without running        |
+| `-v`, `--version` | Show version                                        |
+| `--help`          | Show help message                                   |
 
-| Env var          | Default                        | Purpose                           |
-| ---------------- | ------------------------------ | --------------------------------- |
-| `NNX_MODEL`      | `opencode-go/deepseek-v4-pro`  | Model for the opencode step       |
-| `NNX_AI_TIMEOUT` | `1000`                         | Seconds before opencode is killed |
-| `NNX_NODE`       | `lts`                          | Node line: `lts` or `latest`      |
+| Env var          | Default       | Purpose                             |
+| ---------------- | ------------- | ----------------------------------- |
+| `NNX_MODEL`      | the CLI's own | Model for the AI CLI                |
+| `NNX_AI_TIMEOUT` | `1000`        | Seconds before the AI CLI is killed |
+| `NNX_NODE`       | `lts`         | Node line: `lts` or `latest`        |
 
-The opencode step needs a working [opencode](https://opencode.ai) install and a
-provider for `NNX_MODEL` (the default uses an OpenCode Go subscription). If
-`opencode --version` fails, the script warns and continues as `--no-ai`.
+`NNX_MODEL` defaults to `opencode-go/deepseek-v4-pro` for opencode (an OpenCode
+Go subscription) and to the CLI's own default for `claude` and `codex`. The
+chosen CLI must be installed and logged in; if `<cli> --version` fails, the
+script warns and continues as `--no-ai`.
 
 ### Examples
 
 ```bash
 ./new-next.sh my-nextjs-app
+./new-next.sh --provider prisma --ai claude my-nextjs-app
 ./new-next.sh --preset b1f3nwcmmG my-nextjs-app
 ./new-next.sh --dry-run my-nextjs-app
 ```
@@ -51,7 +81,7 @@ provider for `NNX_MODEL` (the default uses an OpenCode Go subscription). If
 Scaffolds a new Next.js project with:
 
 - TypeScript enabled
-- ESLint configured
+- Biome or ESLint, from `linter` (`--biome` / `--eslint`)
 - Tailwind CSS included
 - App Router (not Pages Router)
 - Turbopack enabled
@@ -132,7 +162,7 @@ pg                    # PostgreSQL client
 ```
 
 > [!NOTE]
-> Nothing is pinned as of v3.0.0. The old `next` pin was added when `latest`
+> Nothing but the Prisma toolchain (above) is pinned. The old `next` pin was added when `latest`
 > briefly resolved to a preview whose SWC binary was unpublished; that stopped
 > being true, but the pin stayed, and because it downgraded Next *after*
 > `create-next-app` had generated config for a newer major, it silently broke
@@ -149,9 +179,9 @@ pg                    # PostgreSQL client
 
 ### Step 3: Initializes shadcn/ui
 
-- Runs `shadcn init --preset b1oVxsfY --template next --pointer` (`--preset`
-  swaps the code). A preset carries the whole design system and can only be
-  applied at `init`
+- Runs `shadcn init --preset <preset> --template next --pointer` with the
+  configured preset (`b0` by default). A preset carries the whole design system
+  and can only be applied at `init`
 - Installs **all** available shadcn/ui components
 
 ### Step 4: Sets Up Project Structure
@@ -225,32 +255,63 @@ a Node it isn't running on.
   compose call needs `--env-file .env`; without it `POSTGRES_PASSWORD` silently
   becomes empty, so these scripts carry the flag
 
-### Step 8: Commits a Snapshot
+### Step 8: Configures Biome (`linter: biome` only)
+
+- Turns the linter off for `components/ui/**` in `biome.json` (formatting stays
+  on). shadcn's vendored components trip recommended rules — a11y,
+  `noArrayIndexKey`, `useExhaustiveDependencies` — and that list changes with
+  every shadcn and Biome release
+- Runs `biome check --write` once. `pnpm lint` is `biome check`, which also
+  fails on formatting: shadcn writes no semicolons and the script's templates use
+  single quotes
+
+The Biome version is whatever `create-next-app` installs. Don't bump it to
+`latest` on its own: Biome 2.5 also lints SVGs and fails on the stock
+`public/*.svg` files.
+
+### Step 9: Commits a Snapshot
 
 Commits everything so far, so the next step's changes show up on their own in
 `git diff`. Makes sure `.env` is git-ignored first.
 
-### Step 9: Wires Better Auth with opencode
+### Step 10: Wires Better Auth with the AI CLI
 
-Runs `opencode run --auto` headlessly with a prompt that describes **what** to
+Runs the configured CLI headlessly with a prompt that describes **what** to
 build, not the code. The model reads the installed packages' types, so the code
 follows whatever versions got installed instead of a template that goes stale.
 It writes:
 
-- `auth.ts`: Better Auth on a raw `pg.Pool`, email/password with auto sign-in,
-  admin (default role `MEMBER`), API key and anonymous plugins
+- `auth.ts`: Better Auth on the provider's adapter, email/password with auto
+  sign-in, admin (default role `MEMBER`), API key and anonymous plugins
 - `lib/auth-client.ts`: React client with matching plugins and exported hooks
 - `app/api/auth/[...all]/route.ts`: the route handler
-- ESLint override blocks for `.gmrc.js` and the vendored shadcn files
+- ESLint only: override blocks for `.gmrc.js` and the vendored shadcn files
 
-Guardrails: all shell commands except `pnpm typecheck`/`lint`/`build`/`exec`
-and `ls` are denied, `~/.claude/CLAUDE.md` is not loaded, and the run is killed
-after `NNX_AI_TIMEOUT` seconds.
+Each CLI gets the narrowest guardrail it supports, and every run is killed after
+`NNX_AI_TIMEOUT` seconds:
 
-### Step 10: Verifies
+- **opencode** (`opencode run --auto`): `OPENCODE_PERMISSION` denies every shell
+  command except `pnpm typecheck`/`lint`/`build`/`exec` and `ls`;
+  `~/.claude/CLAUDE.md` is not loaded
+- **claude** (`claude -p --permission-mode dontAsk`): every tool not in
+  `--allowedTools` is denied — file read/edit/write plus the same `pnpm`
+  commands; `--setting-sources project` keeps your `~/.claude` settings and
+  `CLAUDE.md` out
+- **codex** (`codex exec --sandbox workspace-write`): **weaker** — codex has no
+  command allowlist, so it can run any shell command. The sandbox keeps writes
+  inside the project; network is on because `pnpm build` downloads the
+  `next/font` files. `--ignore-user-config` keeps `~/.codex/config.toml` out
 
-Runs `pnpm typecheck && pnpm lint && pnpm build` itself and exits non-zero if any
-fail. Review what opencode changed with `git diff`.
+### Step 11: Verifies
+
+Fails if `auth.ts`, `lib/auth-client.ts` or `app/api/auth/[...all]/route.ts` is
+missing (typecheck alone passes without them, since nothing imports them yet),
+then runs `pnpm typecheck && pnpm lint && pnpm build`. Under Biome it formats
+the model's files first.
+
+If any check fails, the AI CLI gets **one** more run with the failing output
+appended to the prompt, then the checks run again. A second failure exits
+non-zero; review what the model changed with `git diff`.
 
 > Neither the Better Auth schema nor the Kysely types are generated at scaffold time — both need a **live database** (the Better Auth `pg` adapter introspects the DB to diff the schema, and `kysely-codegen` reads it). They run as post-setup steps once Postgres is up (`pnpm auth:generate`, then `pnpm db:codegen`).
 
@@ -308,7 +369,7 @@ After running the script, your project includes:
 - ✅ **Next.js** (whatever `create-next-app` installs) - React framework with App Router
 - ✅ **TypeScript** - Type-safe development
 - ✅ **Turbopack** - Fast bundler
-- ✅ **ESLint** - Code linting
+- ✅ **Biome** (default) or **ESLint** - Linting; Biome also formats
 
 ### Styling & UI
 
@@ -408,7 +469,8 @@ Default, **kysely**:
 
 To modify the default setup, edit the script:
 
-- **Change the shadcn design system**: pass `--preset <code>`
+- **Change the defaults**: `--setup`, or edit `~/.config/new/config.yaml`
+- **Change the shadcn design system for one project**: pass `--preset <code>`
 - **Skip specific shadcn components**: Replace `--all` with specific component names in `step_init_shadcn`
 - **Add/remove dependencies**: Edit the `pnpm add` lists in `step_install_deps` / `step_install_dev_deps`
 - **Customize Better Auth**: Edit the `ai_prompt` heredoc in the script (describe what you want, not the code), or edit the generated `auth.ts` and `lib/auth-client.ts` afterwards
@@ -417,6 +479,14 @@ To modify the default setup, edit the script:
 
 ## Troubleshooting
 
+- **AI step wrote nothing / `response was blocked by the provider's content filter`**:
+  the model's provider stopped the run. Verify catches the missing auth files
+  and retries once; if it fails again, rerun with another CLI or model
+  (`--ai claude`, or `NNX_MODEL=...`)
+- **Error naming `config.yaml:<line>`**: a value or key in the config file is
+  wrong. Fix the line, or delete the file and answer the questions again
+- **`pnpm lint` fails on formatting after `shadcn add`** (Biome): new components
+  arrive unformatted. Run `pnpm format`
 - **shadcn init fails**: Ensure you have a compatible Node.js version
 - **`pnpm db:codegen` fails**: Ensure Postgres is running and migrations are applied (`docker compose ... up -d`, then `pnpm db:watch --once`); `kysely-codegen` needs a live database
 - **Prisma: `P1001 Can't reach database server`**: the generated `.env` uses `127.0.0.1`, not `localhost`; Prisma's engine resolves `localhost` to `::1` first and the Postgres container publishes IPv4 only. If you switch hosts and hit this, keep the address
