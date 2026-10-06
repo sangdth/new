@@ -60,8 +60,11 @@ script with the file and line number.
 | `NNX_AI_TIMEOUT` | `1000`        | Seconds before the AI CLI is killed |
 | `NNX_NODE`       | `lts`         | Node line: `lts` or `latest`        |
 
-`NNX_MODEL` defaults to `opencode-go/deepseek-v4-pro` for opencode (an OpenCode
-Go subscription) and to the CLI's own default for `claude` and `codex`. The
+`NNX_MODEL` defaults to `openrouter/deepseek/deepseek-v4-pro` for opencode (needs
+an OpenRouter key in `opencode auth`) and to the CLI's own default for `claude`
+and `codex`. The same model on the OpenCode Go route
+(`opencode-go/deepseek-v4-pro`) kept stopping runs with "blocked by the
+provider's content filter". The
 chosen CLI must be installed and logged in; if `<cli> --version` fails, the
 script warns and continues as `--no-ai`.
 
@@ -282,7 +285,8 @@ follows whatever versions got installed instead of a template that goes stale.
 It writes:
 
 - `auth.ts`: Better Auth on the provider's adapter, email/password with auto
-  sign-in, admin (default role `MEMBER`), API key and anonymous plugins
+  sign-in, admin (Better Auth's default `user`/`admin` roles), API key and
+  anonymous plugins
 - `lib/auth-client.ts`: React client with matching plugins and exported hooks
 - `app/api/auth/[...all]/route.ts`: the route handler
 - ESLint only: override blocks for `.gmrc.js` and the vendored shadcn files
@@ -290,8 +294,10 @@ It writes:
 Each CLI gets the narrowest guardrail it supports, and every run is killed after
 `NNX_AI_TIMEOUT` seconds:
 
-- **opencode** (`opencode run --auto`): `OPENCODE_PERMISSION` denies every shell
-  command except `pnpm typecheck`/`lint`/`build`/`exec` and `ls`;
+- **opencode** (`opencode run --auto`): `OPENCODE_PERMISSION` allows the shell
+  but denies changing packages (`pnpm add`/`install`/`update`/`remove`/`dlx`,
+  `npm`, `npx`, `yarn`) and `git`, and any path outside the project. An allowlist
+  cost the model a turn on every `cat`/`echo`/`python` read it tried.
   `~/.claude/CLAUDE.md` is not loaded
 - **claude** (`claude -p --permission-mode dontAsk`): every tool not in
   `--allowedTools` is denied — file read/edit/write plus the same `pnpm`

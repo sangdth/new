@@ -137,7 +137,9 @@ is_one_of() {
 
 default_model() {
   case "$1" in
-    opencode) echo "opencode-go/deepseek-v4-pro" ;;
+    # Same model as opencode-go/deepseek-v4-pro, whose route kept stopping
+    # runs with "blocked by the provider's content filter".
+    opencode) echo "openrouter/deepseek/deepseek-v4-pro" ;;
     *) echo "" ;;
   esac
 }
@@ -819,7 +821,9 @@ EOL
   esac
   cat <<'EOL'
    - email and password sign-in enabled, with automatic sign-in after sign-up
-   - plugins: admin (default role `MEMBER`), API key, anonymous. Some plugins ship
+   - plugins: admin, API key, anonymous, each with its default options (no
+     custom roles or default role; the admin plugin's own `user`/`admin` roles
+     apply). Some plugins ship
      as separate `@better-auth/<name>` packages instead of the `better-auth/plugins`
      barrel; the API key plugin is installed as `@better-auth/api-key`. Use
      whatever the installed packages actually export.
@@ -857,6 +861,8 @@ EOL
 
 - Add, remove, upgrade or downgrade any package, or run `pnpm add`,
   `pnpm install`, `pnpm update` or `pnpm dlx`.
+- Run `git`. The scaffold is already committed; your changes are reviewed with
+  `git diff` afterwards.
 EOL
   case "$PROVIDER" in
     kysely)
@@ -897,10 +903,12 @@ build_ai_command() {
   local model=()
   case "$AI" in
     opencode)
-      # Deny every shell command except the checks the prompt asks for. --auto
-      # approves anything not denied, so this list is the guardrail. doom_loop
-      # defaults to "ask", which --auto would approve.
-      local permission='{"bash":{"*":"deny","pnpm typecheck*":"allow","pnpm lint*":"allow","pnpm build*":"allow","pnpm exec *":"allow","ls*":"allow"},"external_directory":"deny","doom_loop":"deny"}'
+      # Shell is open so the model can read with cat/grep/python as it likes;
+      # an allowlist only cost it turns on denied reads. Denied: changing
+      # packages (the prompt forbids it) and git (the snapshot commit is the
+      # baseline for `git diff`). The last matching rule wins. --auto approves
+      # anything not denied; doom_loop defaults to "ask", which --auto would approve.
+      local permission='{"bash":{"*":"allow","pnpm add*":"deny","pnpm install*":"deny","pnpm i *":"deny","pnpm update*":"deny","pnpm up*":"deny","pnpm remove*":"deny","pnpm rm*":"deny","pnpm dlx*":"deny","npm *":"deny","npx *":"deny","yarn*":"deny","git *":"deny"},"external_directory":"deny","doom_loop":"deny"}'
       # OPENCODE_DISABLE_CLAUDE_CODE keeps ~/.claude/CLAUDE.md out of the run.
       AI_CMD=(env OPENCODE_DISABLE_CLAUDE_CODE=1 "OPENCODE_PERMISSION=$permission"
         opencode run --auto -m "$AI_MODEL" --title "nnx: wire $APP_NAME" "$prompt")
