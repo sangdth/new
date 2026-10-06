@@ -1,6 +1,6 @@
 # new-next.sh — Next.js Scaffolding Script
 
-Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Kysely + graphile-migrate, Better Auth, the Vercel AI SDK, and Jotai — plus a local Docker stack (Postgres, Redis, Mailpit).
+Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Better Auth, the Vercel AI SDK, and Jotai — plus a local Docker stack (Postgres, Redis, Mailpit). The database layer is chosen with `--provider`: Kysely + graphile-migrate (default), Prisma, or Drizzle.
 
 > Installation and symlink setup live in the [root README](../README.md#installation).
 
@@ -20,6 +20,7 @@ first. Help and version output adapt to the name you invoked it under.
 | Flag              | Description                                                      |
 | ----------------- | ---------------------------------------------------------------- |
 | `--preset <code>` | shadcn preset code from the theme builder (default: `b1oVxsfY`)  |
+| `--provider <db>` | Database/auth layer: `kysely` (default), `prisma` or `drizzle`    |
 | `--no-ai`         | Skip the opencode step that writes the auth code                 |
 | `--dry-run`       | Print what would be executed without running anything            |
 | `-v`, `--version` | Show version                                                     |
@@ -105,10 +106,14 @@ The versions are fixed once the project exists. To move a project forward, edit
 ```bash
 concurrently      # Run multiple commands concurrently
 rimraf            # Cross-platform rm -rf
-graphile-migrate  # SQL migration tool
-kysely-codegen    # Generate Kysely types from the database
 @types/pg         # TypeScript types for the pg driver
 ```
+
+Plus the migration tooling the chosen `--provider` needs: `graphile-migrate`
+and `kysely-codegen` (kysely), `prisma@^7` (prisma) or `drizzle-kit` (drizzle).
+The Prisma toolchain is pinned to major 7 because the `prisma` CLI's `latest`
+dist-tag is currently an 8.0.0 RC while `@prisma/client`'s is 7.x, and a
+mismatched CLI and client cannot work together.
 
 **Core Dependencies:**
 
@@ -153,21 +158,24 @@ pg                    # PostgreSQL client
 
 Creates necessary directories:
 
-- `migrations/committed/` (graphile-migrate)
 - `docker/`
 - `lib/`
+- `migrations/committed/` (kysely) or `prisma/` (prisma)
 
 ### Step 5: Configures Environment Variables
 
 Creates `.env` with:
 
 - Better Auth configuration (secret, URL, telemetry settings)
-- PostgreSQL database URL, plus `SHADOW_DATABASE_URL` and `ROOT_DATABASE_URL` for graphile-migrate
+- PostgreSQL database URL (the Prisma provider uses `127.0.0.1` instead of
+  `localhost`, because Prisma's engine resolves `localhost` to `::1` first and
+  the Postgres container listens on IPv4 only)
+- `SHADOW_DATABASE_URL` and `ROOT_DATABASE_URL` for graphile-migrate (kysely only)
 - SMTP settings for Mailpit (local email testing)
 
-### Step 6: Configures the Database (Kysely + graphile-migrate)
+### Step 6: Configures the Database (depends on `--provider`)
 
-Creates `lib/db.ts` with:
+**kysely (default)** creates `lib/db.ts` with:
 
 - Kysely client using the `pg` `PostgresDialect`
 - Global instance (development-optimized)
@@ -183,6 +191,22 @@ Creates `.gmrc.js` (graphile-migrate config) that:
 - Loads `.env` via `require('dotenv/config')` (graphile-migrate does not auto-load it)
 - Reads `DATABASE_URL`, `SHADOW_DATABASE_URL`, and `ROOT_DATABASE_URL` from the environment
 
+**prisma** creates:
+
+- `prisma/schema.prisma` with the `prisma-client` generator (client engine,
+  output `lib/prisma/generated`) and a datasource with no `url`: Prisma 7 moved
+  the connection string out of the schema
+- `prisma.config.ts` that reads `DATABASE_URL` through `prisma/config`'s `env()`
+- `lib/prisma.ts`, a `PrismaClient` singleton wired through `@prisma/adapter-pg`
+- `**/lib/prisma/generated` in `.gitignore`, and one `prisma generate` run so the
+  client exists before the auth step type-checks against it
+
+**drizzle** creates:
+
+- `lib/db.ts`, a `drizzle()` client over a `pg` `Pool` (global instance)
+- `drizzle.config.ts` pointing at the generated auth schema, migrations in `./drizzle`
+- `lib/auth-schema.ts` as an empty module, overwritten by `pnpm auth:generate`
+
 ### Step 7: Adds package.json Scripts
 
 Adds via `npm pkg set`. This runs right after `create-next-app`, before the pin
@@ -191,9 +215,12 @@ a Node it isn't running on.
 
 - `typecheck` (`next typegen && tsc --noEmit`; `next typegen` writes the
   `LayoutProps`/`PageProps` route types into the gitignored `.next/`)
-- `db:watch`, `db:migrate`, `db:commit`, `db:reset`
-- `db:codegen` (excludes graphile-migrate's own tables from the `DB` type)
-- `auth:generate`
+- `db:*` scripts for the chosen provider: `db:watch` / `db:migrate` / `db:commit` /
+  `db:reset` / `db:codegen` (kysely), `db:generate` / `db:migrate` / `db:deploy` /
+  `db:studio` (prisma), `db:generate` / `db:migrate` / `db:push` / `db:studio` (drizzle)
+- `auth:generate` (the Better Auth CLI; it installs `@prisma/client` and
+  `better-sqlite3` whatever the provider is, so its command carries
+  `--allow-build` for both — see Troubleshooting)
 - `docker`, `docker:stop`, `docker:down`, `docker:ps`, `docker:logs`. Every
   compose call needs `--env-file .env`; without it `POSTGRES_PASSWORD` silently
   becomes empty, so these scripts carry the flag
@@ -229,7 +256,8 @@ fail. Review what opencode changed with `git diff`.
 
 ## Post-Setup Steps
 
-After the script completes:
+The script prints the exact sequence for the provider it scaffolded. After the
+script completes:
 
 1. **Start the local services** (Postgres, Redis, Mailpit). This blocks until healthy
 
@@ -238,40 +266,35 @@ After the script completes:
    pnpm docker
    ```
 
-2. **Generate the Better Auth schema** into `migrations/current.sql` (needs the DB running)
+Then, **kysely** (default):
 
-   ```bash
-   pnpm auth:generate
-   ```
+2. `pnpm auth:generate` — writes the Better Auth schema to `migrations/current.sql`
+3. `perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql`
+   — graphile-migrate re-executes `current.sql` on every change and again at
+   commit, and the CLI's plain `create table` fails the second time with `42P07`
+4. `pnpm db:watch --once` then `pnpm db:codegen` — apply the migration and read
+   the Kysely types back out of the database
+5. `pnpm db:commit` — freeze the auth schema as `migrations/committed/000001.sql`.
+   Apply committed migrations elsewhere with `pnpm db:migrate`
 
-3. **Make the migration re-runnable**. graphile-migrate re-executes
-   `current.sql` on every change and again at commit, and the CLI's plain
-   `create table` fails the second time with `42P07`
+**prisma**:
 
-   ```bash
-   perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
-   ```
+2. `pnpm auth:generate` — adds the Better Auth models to `prisma/schema.prisma`
+3. `pnpm db:migrate` — creates the database, writes the first migration and
+   applies it (`--name init` keeps it non-interactive)
+4. `pnpm db:deploy` applies migrations in other environments
 
-4. **Apply the migration** and **generate Kysely types** from the database
+**drizzle**:
 
-   ```bash
-   pnpm db:watch --once
-   pnpm db:codegen
-   ```
-
-5. **Freeze the auth schema** as `migrations/committed/000001.sql`. Apply committed
-   migrations in other environments with `pnpm db:migrate`
-
-   ```bash
-   pnpm db:commit
-   ```
+2. `pnpm auth:generate` — writes the auth tables to `lib/auth-schema.ts`
+3. `pnpm db:generate` then `pnpm db:migrate` — write and apply the migration
+4. `pnpm db:push` syncs the schema without a migration file when you iterate
 
 6. **Update environment variables** (if needed)
    - Add an OpenAI API key if using AI features
    - Update database credentials if not using the defaults
 
 7. **Start the development server**
-
    ```bash
    pnpm dev
    ```
@@ -293,13 +316,28 @@ After running the script, your project includes:
 - ✅ **shadcn/ui** - All components pre-installed
   - Accordion, Alert, Avatar, Badge, Button, Calendar, Card, Checkbox, Collapsible, Command, Context Menu, Dialog, Drawer, Dropdown Menu, Form, Input, Label, Menubar, Navigation Menu, Pagination, Popover, Progress, Radio Group, Scroll Area, Select, Separator, Sheet, Skeleton, Slider, Switch, Table, Tabs, Textarea, Toast, Toggle, Tooltip, and more
 
-### Database & Migrations
+### Database & Migrations (chosen with `--provider`)
+
+Default, **kysely**:
 
 - ✅ **Kysely** - Type-safe SQL query builder
 - ✅ **PostgreSQL** - Database client (pg)
 - ✅ **kysely-codegen** - Generates `DB` types from the live database
 - ✅ **graphile-migrate** - SQL-first migrations (`.gmrc.js`, `migrations/`)
 - ✅ Pre-configured Kysely client with a development-optimized global instance
+
+`--provider prisma`:
+
+- ✅ **Prisma 7** - `prisma-client` generator with the client engine
+- ✅ **@prisma/adapter-pg** - driver adapter, so no bundled engine binary
+- ✅ `prisma.config.ts` - Prisma 7 reads the connection URL here, not from the schema
+- ✅ Pre-configured client singleton in `lib/prisma.ts`
+
+`--provider drizzle`:
+
+- ✅ **drizzle-orm** with the node-postgres driver
+- ✅ **drizzle-kit** - `generate`, `migrate`, `push`, `studio`
+- ✅ `drizzle.config.ts` pointing at `lib/auth-schema.ts`
 
 ### Authentication
 
@@ -334,7 +372,7 @@ After running the script, your project includes:
 ## Generated Project Structure
 
 ```text
-<app-name>/
+<app-name>/                      # kysely (default); see --provider for the others
 ├── app/
 │   └── api/
 │       └── auth/
@@ -343,16 +381,25 @@ After running the script, your project includes:
 ├── docker/
 │   └── compose.dev.yml            # Docker Compose (Postgres, Redis, Mailpit)
 ├── lib/
-│   ├── db.ts                      # Kysely client
+│   ├── db.ts                      # Kysely client (drizzle: db client)
 │   ├── db-types.ts                # Generated Kysely types (kysely-codegen)
 │   └── auth-client.ts             # Auth client hooks
 ├── migrations/
 │   ├── current.sql                # Active migration (Better Auth schema)
 │   └── committed/                 # Committed migrations
-├── auth.ts                        # Auth server config (pg Pool)
+├── auth.ts                        # Auth server config (pg Pool / adapter)
 ├── .gmrc.js                       # graphile-migrate config
 ├── .nvmrc                         # Node version (same as devEngines.runtime)
 └── .env                           # Environment variables
+
+# prisma instead of migrations/ and .gmrc.js:
+├── prisma/schema.prisma           # Generator, datasource, Better Auth models
+├── prisma.config.ts               # Connection URL for the CLI
+└── lib/prisma.ts                  # PrismaClient singleton over @prisma/adapter-pg
+
+# drizzle instead of migrations/ and .gmrc.js:
+├── drizzle.config.ts              # schema, out dir, connection
+└── lib/auth-schema.ts             # Generated by pnpm auth:generate
 ```
 
 ## Customization
@@ -372,6 +419,15 @@ To modify the default setup, edit the script:
 
 - **shadcn init fails**: Ensure you have a compatible Node.js version
 - **`pnpm db:codegen` fails**: Ensure Postgres is running and migrations are applied (`docker compose ... up -d`, then `pnpm db:watch --once`); `kysely-codegen` needs a live database
+- **Prisma: `P1001 Can't reach database server`**: the generated `.env` uses `127.0.0.1`, not `localhost`; Prisma's engine resolves `localhost` to `::1` first and the Postgres container publishes IPv4 only. If you switch hosts and hit this, keep the address
+- **Prisma: the CLI installs an 8.0.0 RC**: the `prisma` package's `latest` dist-tag points at a release candidate while `@prisma/client`'s is still 7.x. The scaffold pins `prisma@^7`; a mismatched CLI and client cannot work
+- **Prisma: `prisma migrate dev` hangs**: it prompts for a migration name when stdin is not a TTY. `pnpm db:migrate` passes `--name init` for that reason
+- **`pnpm auth:generate` fails with `ERR_PNPM_IGNORED_BUILDS`**: the Better Auth CLI
+  install pulls `@prisma/client` and `better-sqlite3`, and the generated
+  `pnpm-workspace.yaml` denies build scripts it was not told about, which pnpm 11+ treats
+  as an install error. The generated `auth:generate` script passes
+  `--allow-build=@prisma/client --allow-build=better-sqlite3`; if the CLI ever adds
+  another native dependency, allow it there too.
 - **graphile-migrate can't connect**: Check `DATABASE_URL` / `SHADOW_DATABASE_URL` / `ROOT_DATABASE_URL` in `.env` — all three must be **distinct** or graphile-migrate refuses to start
 - **`pnpm build` fails in `components/ui/calendar.tsx`**: `shadcn add --all` can pull a `react-day-picker` major (v10) the generated component isn't written for. Unrelated to the DB/auth setup — SWC compilation itself succeeds
 
