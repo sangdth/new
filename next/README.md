@@ -1,6 +1,6 @@
 # new-next.sh — Next.js Scaffolding Script
 
-Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Better Auth, the Vercel AI SDK, and Jotai — plus a local Docker stack (Postgres, Redis, Mailpit). Four choices shape the project — database layer (Kysely + graphile-migrate, Prisma or Drizzle), the AI CLI that writes the auth code (opencode, Claude Code or Codex), linter (Biome or ESLint) and shadcn preset — and are saved once in a [config file](#config-file).
+Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Better Auth, the Vercel AI SDK, and Jotai — plus a local Docker stack (Postgres, Redis, Mailpit). Four choices shape the project — ORM (Kysely + graphile-migrate, Prisma or Drizzle), the AI client that writes the auth code (opencode, Claude Code or Codex), linter (Biome or ESLint) and shadcn preset — and are saved once in a [config file](#config-file). `--auth-saas` swaps the default auth plugins for a multi-tenant SaaS set.
 
 > Installation and symlink setup live in the [root README](../README.md#installation).
 
@@ -21,10 +21,10 @@ first. Help and version output adapt to the name you invoked it under.
 `${XDG_CONFIG_HOME:-~/.config}/new/config.yaml` holds your defaults:
 
 ```yaml
-provider: kysely   # kysely | prisma | drizzle
-ai: opencode       # opencode | claude | codex
-linter: biome      # biome | eslint
-preset: b0         # shadcn preset code
+orm: kysely             # kysely | prisma | drizzle
+ai-client: opencode     # opencode | claude | codex
+linter: biome           # biome | eslint
+shadcn-preset: b0       # shadcn preset code
 ```
 
 - **First run:** if the file is missing and the script runs in a terminal, it
@@ -38,21 +38,26 @@ preset: b0         # shadcn preset code
 
 Each value is picked as: flag, else config file, else built-in default. Flags
 apply to one run and never change the file. A bad value or unknown key stops the
-script with the file and line number.
+script with the file and line number. The keys `provider`, `ai` and `preset`
+stop it with the new name to use (`orm`, `ai-client`, `shadcn-preset`).
 
 ### Flags
 
-| Flag              | Description                                         |
-| ----------------- | --------------------------------------------------- |
-| `--provider <db>` | Database/auth layer: `kysely`, `prisma`, `drizzle`  |
-| `--ai <cli>`      | AI CLI: `opencode`, `claude`, `codex`               |
-| `--linter <name>` | `biome` or `eslint`                                 |
-| `--preset <code>` | shadcn preset code from the theme builder           |
-| `--setup`         | Ask the config questions again and rewrite the file |
-| `--no-ai`         | Skip the AI step that writes the auth code          |
-| `--dry-run`       | Print what would be executed without running        |
-| `-v`, `--version` | Show version                                        |
-| `--help`          | Show help message                                   |
+| Flag                     | Description                                         |
+| ------------------------ | --------------------------------------------------- |
+| `--orm <name>`           | Database/auth layer: `kysely`, `prisma`, `drizzle`  |
+| `--ai-client <cli>`      | AI CLI: `opencode`, `claude`, `codex`               |
+| `--linter <name>`        | `biome` or `eslint`                                 |
+| `--shadcn-preset <code>` | shadcn preset code from the theme builder           |
+| `--auth-saas`            | Multi-tenant auth plugins; see Authentication       |
+| `--setup`                | Ask the config questions again and rewrite the file |
+| `--no-ai`                | Skip the AI step that writes the auth code          |
+| `--dry-run`              | Print what would be executed without running        |
+| `-v`, `--version`        | Show version                                        |
+| `--help`                 | Show help message                                   |
+
+`--auth-saas` is a switch for one run, not a config key. The old flags
+`--provider`, `--ai` and `--preset` stop the script with the new name.
 
 | Env var          | Default       | Purpose                             |
 | ---------------- | ------------- | ----------------------------------- |
@@ -72,8 +77,9 @@ script warns and continues as `--no-ai`.
 
 ```bash
 ./new-next.sh my-nextjs-app
-./new-next.sh --provider prisma --ai claude my-nextjs-app
-./new-next.sh --preset b1f3nwcmmG my-nextjs-app
+./new-next.sh --orm prisma --ai-client claude my-nextjs-app
+./new-next.sh --auth-saas my-nextjs-app
+./new-next.sh --shadcn-preset b1f3nwcmmG my-nextjs-app
 ./new-next.sh --dry-run my-nextjs-app
 ```
 
@@ -142,7 +148,7 @@ rimraf            # Cross-platform rm -rf
 @types/pg         # TypeScript types for the pg driver
 ```
 
-Plus the migration tooling the chosen `--provider` needs: `graphile-migrate`
+Plus the migration tooling the chosen `--orm` needs: `graphile-migrate`
 and `kysely-codegen` (kysely), `prisma@^7` (prisma) or `drizzle-kit` (drizzle).
 The Prisma toolchain is pinned to major 7 because the `prisma` CLI's `latest`
 dist-tag is currently an 8.0.0 RC while `@prisma/client`'s is 7.x, and a
@@ -179,6 +185,10 @@ pg                    # PostgreSQL client
 > the runtime; that gap is normal and works. What matters is that
 > `migrations/current.sql` ends up with a `create table` for every configured
 > plugin.
+>
+> `--auth-saas` installs nothing extra: organization, two-factor and
+> multi-session ship inside `better-auth`. The script owns every install; the AI
+> step only writes files.
 
 ### Step 3: Initializes shadcn/ui
 
@@ -200,13 +210,13 @@ Creates necessary directories:
 Creates `.env` with:
 
 - Better Auth configuration (secret, URL, telemetry settings)
-- PostgreSQL database URL (the Prisma provider uses `127.0.0.1` instead of
+- PostgreSQL database URL (the Prisma ORM option uses `127.0.0.1` instead of
   `localhost`, because Prisma's engine resolves `localhost` to `::1` first and
   the Postgres container listens on IPv4 only)
 - `SHADOW_DATABASE_URL` and `ROOT_DATABASE_URL` for graphile-migrate (kysely only)
 - SMTP settings for Mailpit (local email testing)
 
-### Step 6: Configures the Database (depends on `--provider`)
+### Step 6: Configures the Database (depends on `--orm`)
 
 **kysely (default)** creates `lib/db.ts` with:
 
@@ -248,11 +258,11 @@ a Node it isn't running on.
 
 - `typecheck` (`next typegen && tsc --noEmit`; `next typegen` writes the
   `LayoutProps`/`PageProps` route types into the gitignored `.next/`)
-- `db:*` scripts for the chosen provider: `db:watch` / `db:migrate` / `db:commit` /
+- `db:*` scripts for the chosen ORM: `db:watch` / `db:migrate` / `db:commit` /
   `db:reset` / `db:codegen` (kysely), `db:generate` / `db:migrate` / `db:deploy` /
   `db:studio` (prisma), `db:generate` / `db:migrate` / `db:push` / `db:studio` (drizzle)
 - `auth:generate` (the Better Auth CLI; it installs `@prisma/client` and
-  `better-sqlite3` whatever the provider is, so its command carries
+  `better-sqlite3` whatever the ORM is, so its command carries
   `--allow-build` for both — see Troubleshooting)
 - `docker`, `docker:stop`, `docker:down`, `docker:ps`, `docker:logs`. Every
   compose call needs `--env-file .env`; without it `POSTGRES_PASSWORD` silently
@@ -284,10 +294,13 @@ build, not the code. The model reads the installed packages' types, so the code
 follows whatever versions got installed instead of a template that goes stale.
 It writes:
 
-- `auth.ts`: Better Auth on the provider's adapter, email/password with auto
+- `auth.ts`: Better Auth on the ORM's adapter, email/password with auto
   sign-in, admin (Better Auth's default `user`/`admin` roles), API key and
-  anonymous plugins
+  anonymous plugins. With `--auth-saas`: organization (teams on, invite links
+  logged to the console), admin, API keys owned by the organization, two-factor
+  and multi-session, and no anonymous
 - `lib/auth-client.ts`: React client with matching plugins and exported hooks
+  (plus the active-organization hook under `--auth-saas`)
 - `app/api/auth/[...all]/route.ts`: the route handler
 - ESLint only: override blocks for `.gmrc.js` and the vendored shadcn files
 
@@ -323,7 +336,7 @@ non-zero; review what the model changed with `git diff`.
 
 ## Post-Setup Steps
 
-The script prints the exact sequence for the provider it scaffolded. After the
+The script prints the exact sequence for the ORM it scaffolded. After the
 script completes:
 
 1. **Start the local services** (Postgres, Redis, Mailpit). This blocks until healthy
@@ -357,6 +370,11 @@ Then, **kysely** (default):
 3. `pnpm db:generate` then `pnpm db:migrate` — write and apply the migration
 4. `pnpm db:push` syncs the schema without a migration file when you iterate
 
+Under `--auth-saas`, `auth:generate` also writes `organization`, `member`,
+`invitation`, `team`, `teamMember` and `twoFactor`. A missing one means the
+Better Auth CLI is behind the runtime; use `@better-auth/cli@beta` in the
+`auth:generate` script.
+
 6. **Update environment variables** (if needed)
    - Add an OpenAI API key if using AI features
    - Update database credentials if not using the defaults
@@ -383,7 +401,7 @@ After running the script, your project includes:
 - ✅ **shadcn/ui** - All components pre-installed
   - Accordion, Alert, Avatar, Badge, Button, Calendar, Card, Checkbox, Collapsible, Command, Context Menu, Dialog, Drawer, Dropdown Menu, Form, Input, Label, Menubar, Navigation Menu, Pagination, Popover, Progress, Radio Group, Scroll Area, Select, Separator, Sheet, Skeleton, Slider, Switch, Table, Tabs, Textarea, Toast, Toggle, Tooltip, and more
 
-### Database & Migrations (chosen with `--provider`)
+### Database & Migrations (chosen with `--orm`)
 
 Default, **kysely**:
 
@@ -393,14 +411,14 @@ Default, **kysely**:
 - ✅ **graphile-migrate** - SQL-first migrations (`.gmrc.js`, `migrations/`)
 - ✅ Pre-configured Kysely client with a development-optimized global instance
 
-`--provider prisma`:
+`--orm prisma`:
 
 - ✅ **Prisma 7** - `prisma-client` generator with the client engine
 - ✅ **@prisma/adapter-pg** - driver adapter, so no bundled engine binary
 - ✅ `prisma.config.ts` - Prisma 7 reads the connection URL here, not from the schema
 - ✅ Pre-configured client singleton in `lib/prisma.ts`
 
-`--provider drizzle`:
+`--orm drizzle`:
 
 - ✅ **drizzle-orm** with the node-postgres driver
 - ✅ **drizzle-kit** - `generate`, `migrate`, `push`, `studio`
@@ -414,6 +432,13 @@ Default, **kysely**:
   - API key authentication
   - Anonymous authentication
   - Auto sign-in after registration
+- ✅ **`--auth-saas`** - Multi-tenant set instead of the above plugins
+  - Organizations with teams, members and invitations
+  - Admin plugin
+  - API keys owned by the organization
+  - Two-factor (TOTP and backup codes)
+  - Multi-session (several accounts in one browser)
+  - No anonymous users
 - ✅ Pre-configured client and server setup
 - ✅ Next.js API routes ready
 
@@ -439,7 +464,7 @@ Default, **kysely**:
 ## Generated Project Structure
 
 ```text
-<app-name>/                      # kysely (default); see --provider for the others
+<app-name>/                      # kysely (default); see --orm for the others
 ├── app/
 │   └── api/
 │       └── auth/
@@ -476,7 +501,7 @@ Default, **kysely**:
 To modify the default setup, edit the script:
 
 - **Change the defaults**: `--setup`, or edit `~/.config/new/config.yaml`
-- **Change the shadcn design system for one project**: pass `--preset <code>`
+- **Change the shadcn design system for one project**: pass `--shadcn-preset <code>`
 - **Skip specific shadcn components**: Replace `--all` with specific component names in `step_init_shadcn`
 - **Add/remove dependencies**: Edit the `pnpm add` lists in `step_install_deps` / `step_install_dev_deps`
 - **Customize Better Auth**: Edit the `ai_prompt` heredoc in the script (describe what you want, not the code), or edit the generated `auth.ts` and `lib/auth-client.ts` afterwards
@@ -488,7 +513,7 @@ To modify the default setup, edit the script:
 - **AI step wrote nothing / `response was blocked by the provider's content filter`**:
   the model's provider stopped the run. Verify catches the missing auth files
   and retries once; if it fails again, rerun with another CLI or model
-  (`--ai claude`, or `NNX_MODEL=...`)
+  (`--ai-client claude`, or `NNX_MODEL=...`)
 - **Error naming `config.yaml:<line>`**: a value or key in the config file is
   wrong. Fix the line, or delete the file and answer the questions again
 - **`pnpm lint` fails on formatting after `shadcn add`** (Biome): new components
