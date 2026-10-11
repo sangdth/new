@@ -8,39 +8,42 @@ set -euo pipefail
 
 # --- Defaults ---------------------------------------------------------------
 
-VERSION="5.0.0"
+VERSION="6.1.0"
 APP_NAME=""
 DRY_RUN=false
 NO_AI=false
 SETUP=false
+AUTH_SAAS=false
+# Short form of the --auth-saas plugin set, for help and status text.
+SAAS_PLUGINS="orgs with teams, admin, org-owned API keys, 2FA, multi-session"
 STEP_NUM=0
 
 # Four choices shape the project. Each comes from its flag, else the config
 # file, else the built-in default below:
-#   provider  database/auth layer: kysely (graphile-migrate), prisma or drizzle
-#   ai        headless CLI that writes the version-sensitive auth code
-#   linter    what create-next-app sets up for `pnpm lint`
-#   preset    shadcn preset code from the theme builder
-PROVIDERS="kysely prisma drizzle"
-AIS="opencode claude codex"
+#   orm            database/auth layer: kysely (graphile-migrate), prisma or drizzle
+#   ai-client      headless CLI that writes the version-sensitive auth code
+#   linter         what create-next-app sets up for `pnpm lint`
+#   shadcn-preset  shadcn preset code from the theme builder
+ORMS="kysely prisma drizzle"
+AI_CLIENTS="opencode claude codex"
 LINTERS="biome eslint"
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/new/config.yaml"
 
-CFG_PROVIDER="kysely"
-CFG_AI="opencode"
+CFG_ORM="kysely"
+CFG_AI_CLIENT="opencode"
 CFG_LINTER="biome"
-CFG_PRESET="b0"
+CFG_SHADCN_PRESET="b0"
 
-FLAG_PROVIDER=""
-FLAG_AI=""
+FLAG_ORM=""
+FLAG_AI_CLIENT=""
 FLAG_LINTER=""
-FLAG_PRESET=""
+FLAG_SHADCN_PRESET=""
 
 # Resolved once flags and config are read.
-PROVIDER=""
-AI=""
+ORM=""
+AI_CLIENT=""
 LINTER=""
-PRESET=""
+SHADCN_PRESET=""
 
 # NNX_MODEL overrides the AI CLI's model. Empty means the CLI's own default,
 # except opencode, which has no usable default of its own.
@@ -68,21 +71,24 @@ Usage: $PROG [flags] <app-name>
        $PROG --setup
 
 Flags (each overrides the config file for this run only):
-  --provider <db>     database/auth layer: kysely, prisma or drizzle
-  --ai <cli>          CLI that writes the auth code: opencode, claude or codex
-  --linter <name>     biome or eslint
-  --preset <code>     shadcn preset code from the theme builder
+  --orm <name>              database/auth layer: kysely, prisma or drizzle
+  --ai-client <cli>         CLI that writes the auth code: opencode, claude or codex
+  --linter <name>           biome or eslint
+  --shadcn-preset <code>    shadcn preset code from the theme builder
 
-  --setup             Ask the questions again and rewrite the config file
-  --no-ai             Skip the AI step that writes the auth code
-  --dry-run           Print what would be executed without running anything
-  -v, --version       Show version
-  --help              Show this help message
+  --auth-saas               SaaS auth plugins, no anonymous users:
+                            $SAAS_PLUGINS
+  --setup                   Ask the questions again and rewrite the config file
+  --no-ai                   Skip the AI step that writes the auth code
+  --dry-run                 Print what would be executed without running anything
+  -v, --version             Show version
+  --help                    Show this help message
 
 Config: $CONFIG_FILE
   Written on the first interactive run from your answers, read on every run
   after. Without it (and without a terminal) the built-in defaults apply:
-  provider $CFG_PROVIDER, ai $CFG_AI, linter $CFG_LINTER, preset $CFG_PRESET.
+  orm $CFG_ORM, ai-client $CFG_AI_CLIENT, linter $CFG_LINTER,
+  shadcn-preset $CFG_SHADCN_PRESET.
 
 Environment:
   NNX_MODEL        Model for the AI CLI (default: the CLI's own; opencode:
@@ -92,8 +98,9 @@ Environment:
 
 Examples:
   $PROG my-app
-  $PROG --provider prisma --ai claude my-app
-  $PROG --preset b1f3nwcmmG my-app
+  $PROG --orm prisma --ai-client claude my-app
+  $PROG --auth-saas my-app
+  $PROG --shadcn-preset b1f3nwcmmG my-app
   $PROG --dry-run my-app
 
 Creates the project as a subdirectory of the current working directory.
@@ -146,7 +153,8 @@ default_model() {
 
 # --- Config -----------------------------------------------------------------
 
-# Accepts a bare code or a pasted `--preset <code>` / `--preset=<code>`.
+# Accepts a bare code or a pasted `--preset <code>` / `--preset=<code>`, the
+# flag shadcn's theme builder prints.
 normalize_preset() {
   local value="$1"
   value="${value#--preset=}"
@@ -164,32 +172,49 @@ valid_preset() {
 check_choice() {
   local key="$1" value="$2" source="$3"
   case "$key" in
-    provider) is_one_of "$value" "$PROVIDERS" || die "$source: provider must be one of: $PROVIDERS (got '$value')" ;;
-    ai) is_one_of "$value" "$AIS" || die "$source: ai must be one of: $AIS (got '$value')" ;;
+    orm) is_one_of "$value" "$ORMS" || die "$source: orm must be one of: $ORMS (got '$value')" ;;
+    ai-client) is_one_of "$value" "$AI_CLIENTS" || die "$source: ai-client must be one of: $AI_CLIENTS (got '$value')" ;;
     linter) is_one_of "$value" "$LINTERS" || die "$source: linter must be one of: $LINTERS (got '$value')" ;;
-    preset) valid_preset "$value" || die "$source: preset must be a shadcn preset code (got '$value')" ;;
+    shadcn-preset) valid_preset "$value" || die "$source: shadcn-preset must be a shadcn preset code (got '$value')" ;;
+  esac
+}
+
+# New name of a renamed config key / flag (without `--`); empty when not renamed.
+renamed_key() {
+  case "$1" in
+    provider) echo orm ;;
+    ai) echo ai-client ;;
+    preset) echo shadcn-preset ;;
   esac
 }
 
 # Flat `key: value` lines; `#` starts a comment. Returns 1 when there is no file.
+# Old key names stop the run, unless $1 is `accept-renamed` (--setup): then they
+# are read under the new name, so the rewrite saves the new keys.
 load_config() {
   [[ -f "$CONFIG_FILE" ]] || return 1
-  local line key value n=0
-  local re='^[[:space:]]*([a-z]+)[[:space:]]*:[[:space:]]*(.*)$'
+  local line key value renamed n=0
+  local re='^[[:space:]]*([a-z-]+)[[:space:]]*:[[:space:]]*(.*)$'
   while IFS= read -r line || [[ -n "$line" ]]; do
     n=$((n + 1))
     line="${line%%#*}"
     [[ -z "${line//[[:space:]]/}" ]] && continue
     [[ "$line" =~ $re ]] || die "$CONFIG_FILE:$n: expected 'key: value'"
     key="${BASH_REMATCH[1]}"
+    renamed="$(renamed_key "$key")"
+    if [[ -n "$renamed" ]]; then
+      [[ "${1:-}" == accept-renamed ]] \
+        || die "$CONFIG_FILE:$n: '$key' was renamed to '$renamed'; edit the file or run $PROG --setup"
+      key="$renamed"
+    fi
     value="$(echo "${BASH_REMATCH[2]}" | tr -d "[:space:]\"'")"
     check_choice "$key" "$value" "$CONFIG_FILE:$n"
     case "$key" in
-      provider) CFG_PROVIDER="$value" ;;
-      ai) CFG_AI="$value" ;;
+      orm) CFG_ORM="$value" ;;
+      ai-client) CFG_AI_CLIENT="$value" ;;
       linter) CFG_LINTER="$value" ;;
-      preset) CFG_PRESET="$value" ;;
-      *) die "$CONFIG_FILE:$n: unknown key '$key' (expected provider, ai, linter or preset)" ;;
+      shadcn-preset) CFG_SHADCN_PRESET="$value" ;;
+      *) die "$CONFIG_FILE:$n: unknown key '$key' (expected orm, ai-client, linter or shadcn-preset)" ;;
     esac
   done <"$CONFIG_FILE"
 }
@@ -210,20 +235,20 @@ ask_choice() {
 
 ask_config() {
   echo "Choose the defaults for new projects. Press Enter to keep the value in brackets."
-  ask_choice "Database provider" "$CFG_PROVIDER" "$PROVIDERS"
-  CFG_PROVIDER="$ANSWER"
-  ask_choice "AI CLI for the auth code" "$CFG_AI" "$AIS"
-  CFG_AI="$ANSWER"
+  ask_choice "ORM (database layer)" "$CFG_ORM" "$ORMS"
+  CFG_ORM="$ANSWER"
+  ask_choice "AI CLI for the auth code" "$CFG_AI_CLIENT" "$AI_CLIENTS"
+  CFG_AI_CLIENT="$ANSWER"
   ask_choice "Linter" "$CFG_LINTER" "$LINTERS"
   CFG_LINTER="$ANSWER"
   local reply
   while true; do
-    read -r -p "shadcn preset code, or paste '--preset <code>' [$CFG_PRESET]: " reply \
+    read -r -p "shadcn preset code, or paste '--preset <code>' [$CFG_SHADCN_PRESET]: " reply \
       || die "no answer for: shadcn preset"
     reply="$(normalize_preset "$reply")"
-    reply="${reply:-$CFG_PRESET}"
+    reply="${reply:-$CFG_SHADCN_PRESET}"
     if valid_preset "$reply"; then
-      CFG_PRESET="$reply"
+      CFG_SHADCN_PRESET="$reply"
       break
     fi
     echo "  A preset code is letters, digits, '-' and '_' only" >&2
@@ -234,11 +259,12 @@ write_config() {
   run_cmd mkdir -p "$(dirname "$CONFIG_FILE")"
   run_write "$CONFIG_FILE" <<EOL
 # Defaults for $PROG. Edit this file, or run \`$PROG --setup\` to answer the
-# questions again. Flags (--provider, --ai, --linter, --preset) override it per run.
-provider: $CFG_PROVIDER   # $PROVIDERS
-ai: $CFG_AI   # $AIS
+# questions again. Flags (--orm, --ai-client, --linter, --shadcn-preset) override
+# it per run.
+orm: $CFG_ORM   # $ORMS
+ai-client: $CFG_AI_CLIENT   # $AI_CLIENTS
 linter: $CFG_LINTER   # $LINTERS
-preset: $CFG_PRESET   # shadcn preset code
+shadcn-preset: $CFG_SHADCN_PRESET   # shadcn preset code
 EOL
   $DRY_RUN || echo "Saved $CONFIG_FILE"
 }
@@ -247,7 +273,7 @@ EOL
 resolve_choices() {
   if $SETUP; then
     [[ -t 0 ]] || die "--setup needs a terminal to ask the questions"
-    load_config || true
+    load_config accept-renamed || true
     ask_config
     write_config
   elif ! load_config; then
@@ -260,12 +286,15 @@ resolve_choices() {
     fi
   fi
 
-  PROVIDER="${FLAG_PROVIDER:-$CFG_PROVIDER}"
-  AI="${FLAG_AI:-$CFG_AI}"
+  ORM="${FLAG_ORM:-$CFG_ORM}"
+  AI_CLIENT="${FLAG_AI_CLIENT:-$CFG_AI_CLIENT}"
   LINTER="${FLAG_LINTER:-$CFG_LINTER}"
-  PRESET="${FLAG_PRESET:-$CFG_PRESET}"
-  AI_MODEL="${AI_MODEL:-$(default_model "$AI")}"
-  echo "Using: provider $PROVIDER, ai $AI, linter $LINTER, preset $PRESET"
+  SHADCN_PRESET="${FLAG_SHADCN_PRESET:-$CFG_SHADCN_PRESET}"
+  AI_MODEL="${AI_MODEL:-$(default_model "$AI_CLIENT")}"
+  echo "Using: orm $ORM, ai-client $AI_CLIENT, linter $LINTER, shadcn-preset $SHADCN_PRESET"
+  if $AUTH_SAAS; then
+    echo "Auth: SaaS ($SAAS_PLUGINS)"
+  fi
 }
 
 # --- Step functions ---------------------------------------------------------
@@ -291,18 +320,42 @@ fetch("https://nodejs.org/dist/index.json")
 check_prereqs() {
   command -v node >/dev/null 2>&1 || die "node not found"
   command -v pnpm >/dev/null 2>&1 || die "pnpm not found (npm i -g pnpm)"
-  command -v docker >/dev/null 2>&1 || warn "docker not found; you'll need it for the post-setup steps"
 
   resolve_toolchain
 
   if ! $NO_AI; then
     # Run the binary rather than checking it exists: a broken install passes
     # `command -v` and then dies on exec with no output.
-    if ! "$AI" --version >/dev/null 2>&1; then
-      warn "$AI is missing or won't run; continuing with --no-ai"
+    if ! "$AI_CLIENT" --version >/dev/null 2>&1; then
+      warn "$AI_CLIENT is missing or won't run; continuing with --no-ai"
       NO_AI=true
     fi
   fi
+
+  # The scaffold runs Postgres to create the auth schema, which needs the
+  # auth.ts the AI step writes; --no-ai leaves both to the user.
+  if $NO_AI; then
+    command -v docker >/dev/null 2>&1 || warn "docker not found; you'll need it for the post-setup steps"
+  elif ! $DRY_RUN; then
+    check_docker
+  fi
+}
+
+# Fail before scaffolding if the database can't start: no daemon, port 5432
+# taken, or a container or volume left by an earlier project of this name
+# (an old volume would skip the init script and hold a stale schema).
+check_docker() {
+  docker info >/dev/null 2>&1 \
+    || die "Docker is not running. Start it, or pass --no-ai to scaffold without the database"
+  if command -v lsof >/dev/null 2>&1; then
+    local holder
+    # lsof exits 1 when nothing listens, which pipefail would turn into a failure.
+    holder="$(lsof +c 0 -nP -iTCP:5432 -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 { print $1 " (pid " $2 ")" }' || true)"
+    [[ -z "$holder" ]] || die "port 5432 is in use by $holder; stop that Postgres first"
+  fi
+  local label="label=com.docker.compose.project=$APP_NAME" left
+  left="$(docker ps -aq --filter "$label")$(docker volume ls -q --filter "$label")"
+  [[ -z "$left" ]] || die "Docker already has containers or volumes for a project named '$APP_NAME'. Remove them with: docker compose -p $APP_NAME down --volumes"
 }
 
 step_create_app() {
@@ -325,7 +378,7 @@ step_create_app() {
 step_install_dev_deps() {
   step "Install dev dependencies"
   local deps=(concurrently rimraf)
-  case "$PROVIDER" in
+  case "$ORM" in
     kysely)
       deps+=(graphile-migrate kysely-codegen @types/pg)
       ;;
@@ -357,25 +410,28 @@ step_install_deps() {
     dotenv
     jotai
   )
-  case "$PROVIDER" in
+  case "$ORM" in
     kysely) deps+=(kysely pg) ;;
     prisma) deps+=(@prisma/client@^7 @prisma/adapter-pg@^7 pg) ;;
     drizzle) deps+=(drizzle-orm pg) ;;
   esac
+  # --auth-saas adds organization, two-factor and multi-session, which ship in
+  # the better-auth package itself. A SaaS plugin that moves to its own
+  # @better-auth/* package gets installed here; the AI step never installs.
   run_cmd pnpm add "${deps[@]}"
 }
 
 step_init_shadcn() {
   step "Initialize shadcn/ui"
   # A preset carries the whole design system and can only be applied at init.
-  run_cmd pnpm dlx shadcn@latest init --preset "$PRESET" --template next --pointer
+  run_cmd pnpm dlx shadcn@latest init --preset "$SHADCN_PRESET" --template next --pointer
   run_cmd pnpm dlx shadcn@latest add --all
 }
 
 step_create_dirs() {
   step "Create directories"
-  local dirs=(docker lib)
-  case "$PROVIDER" in
+  local dirs=(docker/postgres-init lib scripts)
+  case "$ORM" in
     kysely) dirs+=(migrations/committed) ;;
     prisma) dirs+=(prisma) ;;
   esac
@@ -384,20 +440,31 @@ step_create_dirs() {
 
 step_generate_docker_compose() {
   step "Generate docker/compose.dev.yml"
+  # pgvector ships the extension but does not turn it on. Init scripts run once,
+  # on the first boot of an empty volume; template1 gets it too, so every
+  # database created later (graphile shadow, Prisma shadow) has it.
+  run_write docker/postgres-init/001-vector.sql <<'EOL'
+create extension if not exists vector;
+\connect template1
+create extension if not exists vector;
+EOL
+
   # Compose prefixes volume names with the project name, so they stay short.
+  # Relative paths resolve from docker/, where this file lives.
   run_write docker/compose.dev.yml <<EOL
 name: $APP_NAME
 
 services:
   postgres:
     container_name: $APP_NAME-postgres
-    image: postgres:18-alpine
+    image: pgvector/pgvector:pg18-trixie
     restart: unless-stopped
     ports:
       - "5432:5432"
     volumes:
       # Postgres 18+ stores data in a versioned subdir; mount the parent directory.
       - postgres-data:/var/lib/postgresql
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -439,6 +506,73 @@ volumes:
 EOL
 }
 
+step_generate_dev_script() {
+  step "Generate scripts/dev.sh"
+  local migrate
+  case "$ORM" in
+    kysely) migrate="graphile-migrate migrate" ;;
+    prisma) migrate="prisma migrate deploy" ;;
+    drizzle) migrate="drizzle-kit migrate" ;;
+  esac
+  {
+    cat <<'EOL'
+#!/usr/bin/env sh
+# `pnpm dev`: boots the dev containers (Postgres, Redis, Mailpit), applies
+# committed migrations, then runs `next dev` in the foreground, its output
+# copied to logs/terminal.log. A plain `compose up -d && next dev` leaves the
+# containers running after Ctrl-C with nothing to stop them; the trap below is
+# the whole reason this is a file rather than a one-liner.
+set -eu
+set -o pipefail
+
+# Run from the project root whatever the caller's cwd, and put the project's
+# binaries first so a bare `next` is this project's.
+cd "$(dirname "$0")/.."
+PATH="$PWD/node_modules/.bin:$PATH"
+export PATH
+
+if [ ! -f .env ]; then
+	echo "scripts/dev.sh: .env is missing. Create it with POSTGRES_PASSWORD and DATABASE_URL." >&2
+	exit 1
+fi
+
+COMPOSE="docker compose -f docker/compose.dev.yml --env-file .env"
+
+# Containers that were already up belong to whoever started them (another
+# `pnpm dev`, `pnpm docker`): this run leaves them running when it exits.
+ALREADY_UP=$($COMPOSE ps --status running --quiet)
+
+# `stop`, not `down`: the containers stay, so the next boot is seconds. INT and
+# TERM are trapped explicitly, since a shell killed by an untrapped signal need
+# not run its EXIT trap; EXIT also tears down after a failed migrate.
+cleanup() {
+	# Once: an INT that interrupts `next dev` would otherwise run this from the
+	# INT trap and again from the EXIT trap `set -e` fires straight after.
+	trap - INT TERM EXIT
+	if [ -z "$ALREADY_UP" ]; then
+		$COMPOSE stop
+	fi
+}
+trap cleanup INT TERM EXIT
+
+$COMPOSE up -d --wait postgres redis mailpit
+EOL
+    echo "$migrate"
+    cat <<'EOL'
+
+# Copied to logs/terminal.log so an agent can read the server's output. `tee -i`
+# ignores Ctrl-C so it keeps writing Next's shutdown lines; pipefail passes on
+# next's exit status. Each run starts the log fresh.
+mkdir -p logs
+next dev "$@" 2>&1 | tee -i logs/terminal.log
+EOL
+  } | run_write scripts/dev.sh
+  run_cmd chmod +x scripts/dev.sh
+  if ! $DRY_RUN; then
+    grep -qx '/logs' .gitignore 2>/dev/null || printf '\n# scripts/dev.sh output\n/logs\n' >> .gitignore
+  fi
+}
+
 step_generate_env() {
   step "Generate .env"
 
@@ -447,10 +581,10 @@ step_generate_env() {
   # Prisma's engine resolves "localhost" to ::1 first and Postgres in Docker
   # listens on IPv4 only, so it gets the address instead of the name.
   local db_host="localhost"
-  [[ "$PROVIDER" == prisma ]] && db_host="127.0.0.1"
+  [[ "$ORM" == prisma ]] && db_host="127.0.0.1"
   local pg="postgresql://postgres:$password@$db_host:5432"
   local db_extra=""
-  if [[ "$PROVIDER" == kysely ]]; then
+  if [[ "$ORM" == kysely ]]; then
     db_extra="$(printf '\n# graphile-migrate uses a shadow DB (commit) and a root/maintenance DB (reset).\n# All three connection strings must differ, so root points at the default template1.\nSHADOW_DATABASE_URL=%s/postgres_shadow\nROOT_DATABASE_URL=%s/template1' "$pg" "$pg")"
   fi
 
@@ -471,9 +605,9 @@ EOL
 }
 
 step_generate_db_files() {
-  step "Generate database files ($PROVIDER)"
+  step "Generate database files ($ORM)"
 
-  case "$PROVIDER" in
+  case "$ORM" in
     kysely)
   run_write lib/db.ts <<EOL
 import { Kysely, PostgresDialect } from 'kysely';
@@ -661,9 +795,9 @@ step_add_package_scripts() {
   # The auth CLI pulls @prisma/client and better-sqlite3, whose build scripts the
   # generated pnpm-workspace.yaml denies; on pnpm 11+ that aborts the dlx install
   # with ERR_PNPM_IGNORED_BUILDS unless each is allowed here. The CLI bundles
-  # every adapter, so the flags do not vary with --provider.
+  # every adapter, so the flags do not vary with --orm.
   local db_scripts=()
-  case "$PROVIDER" in
+  case "$ORM" in
     kysely)
       db_scripts=(
         "scripts.db:watch=graphile-migrate watch"
@@ -696,6 +830,7 @@ step_add_package_scripts() {
       ;;
   esac
   run_cmd npm pkg set \
+    "scripts.dev=sh scripts/dev.sh" \
     "scripts.typecheck=next typegen && tsc --noEmit" \
     "${db_scripts[@]}" \
     "scripts.docker=$compose up -d --wait" \
@@ -724,7 +859,7 @@ step_pin_toolchain() {
   # fails the install. sharp/unrs-resolver stay denied because Next.js does not
   # need their native builds for this setup.
   local allow_extra=""
-  case "$PROVIDER" in
+  case "$ORM" in
     prisma) allow_extra=$'\n  prisma: true\n  "@prisma/client": true\n  "@prisma/engines": true' ;;
     drizzle) allow_extra=$'\n  esbuild: true' ;;
   esac
@@ -774,6 +909,81 @@ step_snapshot() {
   git commit -q -m "chore: scaffold installs and config" || warn "snapshot commit failed; continuing"
 }
 
+# Starts Postgres for the rest of the scaffold and stops every container of the
+# project when the script exits, however it exits. The volume keeps the data.
+step_start_postgres() {
+  step "Start Postgres"
+  COMPOSE=(docker compose -f "$PWD/docker/compose.dev.yml" --env-file "$PWD/.env")
+  if $DRY_RUN; then
+    echo "  > docker compose up -d --wait postgres (stopped again on exit)"
+    return
+  fi
+  trap stop_containers EXIT
+  trap 'stop_containers; exit 130' INT TERM
+  "${COMPOSE[@]}" up -d --wait postgres || die "Postgres did not start; see: cd $APP_NAME && pnpm docker:logs"
+}
+
+stop_containers() {
+  trap - INT TERM EXIT
+  echo "Stopping the dev containers"
+  "${COMPOSE[@]}" stop >/dev/null 2>&1 || warn "could not stop the containers; run: cd $APP_NAME && pnpm docker:stop"
+}
+
+# Better Auth table names for the configured plugins, lowercased with no
+# underscores, so the check matches every ORM's naming (teamMember, team_member).
+expected_auth_tables() {
+  echo "user session account verification apikey"
+  if $AUTH_SAAS; then
+    echo "organization member invitation team teammember twofactor"
+  fi
+}
+
+# The flow the --no-ai next steps print, run against the live database.
+step_init_database() {
+  step "Create the auth schema and apply it ($ORM)"
+  run_cmd pnpm auth:generate || die "pnpm auth:generate failed"
+  case "$ORM" in
+    kysely)
+      # graphile-migrate re-executes current.sql on every change and again at
+      # commit, and the CLI's plain `create table` fails the second time.
+      run_cmd perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
+      run_cmd pnpm db:watch --once || die "pnpm db:watch --once failed"
+      run_cmd pnpm db:codegen || die "pnpm db:codegen failed"
+      run_cmd pnpm db:commit || die "pnpm db:commit failed"
+      ;;
+    prisma)
+      run_cmd pnpm db:migrate || die "pnpm db:migrate failed"
+      run_cmd pnpm db:generate || die "pnpm db:generate failed"
+      ;;
+    drizzle)
+      run_cmd pnpm db:generate || die "pnpm db:generate failed"
+      run_cmd pnpm db:migrate || die "pnpm db:migrate failed"
+      ;;
+  esac
+  $DRY_RUN && return
+
+  # The Better Auth CLI lags the runtime; a plugin it doesn't know yet leaves
+  # its table out without an error.
+  local tables missing="" table
+  tables=" $("${COMPOSE[@]}" exec -T postgres psql -U postgres -d postgres -Atc \
+    "select lower(replace(tablename, '_', '')) from pg_tables where schemaname = 'public'" | tr '\n' ' ') "
+  for table in $(expected_auth_tables); do
+    [[ "$tables" == *" $table "* ]] || missing="$missing $table"
+  done
+  [[ -z "$missing" ]] || die "auth tables missing after auth:generate:$missing. The Better Auth CLI is behind the runtime; try @better-auth/cli@beta in the auth:generate script"
+}
+
+# The DB step writes generated files (Kysely types, the drizzle schema); they
+# get the same format and type pass as the rest. verify already built the app.
+step_final_check() {
+  step "Check the generated files: typecheck, lint"
+  if [[ "$LINTER" == biome ]]; then
+    run_cmd pnpm exec biome check --write || true
+  fi
+  run_cmd pnpm typecheck || die "pnpm typecheck failed after the database step"
+  run_cmd pnpm lint || die "pnpm lint failed after the database step"
+}
+
 # Intent, not code: the model reads the installed packages to decide how.
 ai_prompt() {
   cat <<'EOL'
@@ -791,8 +1001,9 @@ points at the docs bundled with the installed Next.js.
 
 1. `auth.ts` at the project root (the route handler imports it as `@/auth`): a
    Better Auth server instance with
+   - email and password sign-in enabled, with automatic sign-in after sign-up
 EOL
-  case "$PROVIDER" in
+  case "$ORM" in
     kysely)
       cat <<'EOL'
    - database: a `pg` Pool built from `process.env.DATABASE_URL`, passed directly
@@ -819,19 +1030,44 @@ EOL
 EOL
       ;;
   esac
-  cat <<'EOL'
-   - email and password sign-in enabled, with automatic sign-in after sign-up
+  if $AUTH_SAAS; then
+    cat <<'EOL'
+   - plugins for a multi-tenant SaaS:
+     - organization, with teams enabled. When an invitation needs sending, log
+       the invite link to the server console; there is no mailer yet.
+     - admin, with its default options (the admin plugin's own `user`/`admin`
+       roles apply)
+     - API key, with keys owned by the organization rather than the user (the
+       installed plugin's ownership option)
+     - two-factor, with the app name as the issuer
+     - multi-session, with its default options
+     No anonymous plugin.
+EOL
+  else
+    cat <<'EOL'
    - plugins: admin, API key, anonymous, each with its default options (no
      custom roles or default role; the admin plugin's own `user`/`admin` roles
-     apply). Some plugins ship
-     as separate `@better-auth/<name>` packages instead of the `better-auth/plugins`
-     barrel; the API key plugin is installed as `@better-auth/api-key`. Use
-     whatever the installed packages actually export.
+     apply).
+EOL
+  fi
+  cat <<'EOL'
+   Some plugins ship as separate `@better-auth/<name>` packages instead of the
+   `better-auth/plugins` barrel; the API key plugin is installed as
+   `@better-auth/api-key`. Every package you need is already installed; use
+   whatever the installed packages actually export.
 2. `lib/auth-client.ts`: a Better Auth React client whose client plugins mirror
    the server plugins exactly. Export `authClient`, and destructure and export the
    methods for sign-in, sign-up, sign-out, the session hook, requesting a password
    reset, resetting a password, and verifying an email, using the method names the
    installed client types define.
+EOL
+  if $AUTH_SAAS; then
+    cat <<'EOL'
+   Also export the active-organization hook and the organization client methods
+   for creating an organization and setting the active one.
+EOL
+  fi
+  cat <<'EOL'
 3. `app/api/auth/[...all]/route.ts`: the App Router handler exposing GET and POST
    for the auth instance.
 EOL
@@ -864,7 +1100,7 @@ EOL
 - Run `git`. The scaffold is already committed; your changes are reviewed with
   `git diff` afterwards.
 EOL
-  case "$PROVIDER" in
+  case "$ORM" in
     kysely)
       cat <<'EOL'
 - Edit `components/ui/**`, `hooks/**`, `lib/db.ts`, `lib/db-types.ts`,
@@ -896,12 +1132,12 @@ the files you changed.
 EOL
 }
 
-# Builds AI_CMD: the headless command for $AI that runs prompt $1. Each CLI
+# Builds AI_CMD: the headless command for $AI_CLIENT that runs prompt $1. Each CLI
 # gets the narrowest guardrail it supports, since none asks before acting.
 build_ai_command() {
   local prompt="$1"
   local model=()
-  case "$AI" in
+  case "$AI_CLIENT" in
     opencode)
       # Shell is open so the model can read with cat/grep/python as it likes;
       # an allowlist only cost it turns on denied reads. Denied: changing
@@ -939,10 +1175,10 @@ build_ai_command() {
 
 # Runs the AI CLI on prompt $1 with a wall-clock cap.
 step_wire_auth() {
-  step "Wire Better Auth with $AI${AI_MODEL:+ ($AI_MODEL)}"
+  step "Wire Better Auth with $AI_CLIENT${AI_MODEL:+ ($AI_MODEL)}"
 
   if $DRY_RUN; then
-    echo "  > $AI <headless flags> <prompt>"
+    echo "  > $AI_CLIENT <headless flags> <prompt>"
     return
   fi
 
@@ -954,7 +1190,7 @@ step_wire_auth() {
   local waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [[ $waited -ge $AI_TIMEOUT ]]; then
-      warn "$AI still running after ${AI_TIMEOUT}s; stopping it"
+      warn "$AI_CLIENT still running after ${AI_TIMEOUT}s; stopping it"
       kill "$pid" 2>/dev/null || true
       break
     fi
@@ -997,7 +1233,7 @@ step_verify() {
   log="$(mktemp)"
   run_checks "$log" && { rm -f "$log"; return; }
 
-  warn "checks failed; giving $AI one more run with the errors"
+  warn "checks failed; giving $AI_CLIENT one more run with the errors"
   local retry_prompt
   retry_prompt="$(ai_prompt)
 
@@ -1012,26 +1248,96 @@ $(tail -n 80 "$log")
   : >"$log"
   step_wire_auth "$retry_prompt"
   step "Verify again"
-  run_checks "$log" || { rm -f "$log"; die "verification failed twice. Review what $AI changed with: cd $APP_NAME && git diff"; }
+  run_checks "$log" || { rm -f "$log"; die "verification failed twice. Review what $AI_CLIENT changed with: cd $APP_NAME && git diff"; }
   rm -f "$log"
+}
+
+# Next steps for --no-ai: the scaffold can't create the auth schema itself,
+# since auth.ts is still to be written.
+print_manual_steps() {
+  cat <<EOF
+
+Done! Next steps:
+
+  cd $APP_NAME
+
+  # 1. Start Postgres, Redis, and Mailpit (waits until healthy)
+  pnpm docker
+EOF
+
+  if [[ "$ORM" == kysely ]]; then
+    cat <<'EOL'
+
+  # 2. Generate the Better Auth schema into migrations/current.sql
+  #    (needs the database running — the pg adapter introspects it)
+  pnpm auth:generate
+
+  # 3. Make it re-runnable: graphile-migrate re-executes current.sql on every
+  #    change and again at commit, and plain `create table` fails the second time
+  perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
+
+  # 4. Apply the migration, then generate Kysely types from the database
+  pnpm db:watch --once
+  pnpm db:codegen
+
+  # 5. Freeze the auth schema as migration 000001, then start the dev server
+  pnpm db:commit
+  pnpm dev
+EOL
+  elif [[ "$ORM" == prisma ]]; then
+    cat <<'EOL'
+
+  # 2. Add the Better Auth tables to prisma/schema.prisma
+  #    (needs the database running — the CLI checks the schema against it)
+  pnpm auth:generate
+
+  # 3. Create the database and apply the migration
+  pnpm db:migrate
+
+  # 4. Start the dev server
+  pnpm dev
+EOL
+  else
+    cat <<'EOL'
+
+  # 2. Generate the Better Auth drizzle schema into lib/auth-schema.ts
+  pnpm auth:generate
+
+  # 3. Generate and apply the migration
+  pnpm db:generate
+  pnpm db:migrate
+
+  # 4. Start the dev server
+  pnpm dev
+EOL
+  fi
+
+  if $AUTH_SAAS; then
+    cat <<'EOL'
+
+  auth:generate should also create organization, member, invitation, team,
+  teamMember and twoFactor. If one is missing, the Better Auth CLI is behind the
+  runtime; retry with @better-auth/cli@beta in the auth:generate script.
+EOL
+  fi
 }
 
 # --- Parse arguments --------------------------------------------------------
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --provider | --ai | --linter | --preset)
+    --orm | --ai-client | --linter | --shadcn-preset)
       [[ -n "${2:-}" && "${2:-}" != --* ]] || die "$1 needs a value"
       set -- "$1=$2" "${@:3}"
       ;;
-    --provider=*)
-      FLAG_PROVIDER="${1#--provider=}"
-      check_choice provider "$FLAG_PROVIDER" "--provider"
+    --orm=*)
+      FLAG_ORM="${1#--orm=}"
+      check_choice orm "$FLAG_ORM" "--orm"
       shift
       ;;
-    --ai=*)
-      FLAG_AI="${1#--ai=}"
-      check_choice ai "$FLAG_AI" "--ai"
+    --ai-client=*)
+      FLAG_AI_CLIENT="${1#--ai-client=}"
+      check_choice ai-client "$FLAG_AI_CLIENT" "--ai-client"
       shift
       ;;
     --linter=*)
@@ -1039,9 +1345,13 @@ while [[ $# -gt 0 ]]; do
       check_choice linter "$FLAG_LINTER" "--linter"
       shift
       ;;
-    --preset=*)
-      FLAG_PRESET="${1#--preset=}"
-      check_choice preset "$FLAG_PRESET" "--preset"
+    --shadcn-preset=*)
+      FLAG_SHADCN_PRESET="${1#--shadcn-preset=}"
+      check_choice shadcn-preset "$FLAG_SHADCN_PRESET" "--shadcn-preset"
+      shift
+      ;;
+    --auth-saas)
+      AUTH_SAAS=true
       shift
       ;;
     --setup)
@@ -1064,6 +1374,9 @@ while [[ $# -gt 0 ]]; do
       print_usage
       ;;
     --*)
+      flag="${1%%=*}"
+      renamed="$(renamed_key "${flag#--}")"
+      [[ -z "$renamed" ]] || die "$flag was renamed to --$renamed"
       die "Unknown flag: $1"
       ;;
     *)
@@ -1099,6 +1412,7 @@ step_init_shadcn
 step_create_dirs
 step_generate_env
 step_generate_docker_compose
+step_generate_dev_script
 step_generate_db_files
 if [[ "$LINTER" == biome ]]; then
   step_configure_biome
@@ -1111,72 +1425,30 @@ if $NO_AI; then
 Skipped the AI step (--no-ai). Still to write by hand:
   auth.ts, lib/auth-client.ts, app/api/auth/[...all]/route.ts
 EOF
+  if $AUTH_SAAS; then
+    echo "  with the SaaS plugins: $SAAS_PLUGINS"
+  fi
   if [[ "$LINTER" == eslint ]]; then
     cat <<EOF
   and ESLint overrides for the tooling config and the shadcn files (pnpm lint
   fails until then).
 EOF
   fi
+  print_manual_steps
 else
+  step_start_postgres
   step_wire_auth "$(ai_prompt)"
   step_verify
-fi
+  step_init_database
+  step_final_check
+  $DRY_RUN || stop_containers
+  cat <<EOF
 
-cat <<EOF
-
-Done! Next steps:
+Done! The auth schema is migrated ($ORM) and the containers are stopped.
 
   cd $APP_NAME
-
-  # 1. Start Postgres, Redis, and Mailpit (waits until healthy)
-  pnpm docker
+  pnpm dev    # starts Postgres, Redis and Mailpit, applies migrations, runs next dev
 EOF
-
-if [[ "$PROVIDER" == kysely ]]; then
-  cat <<'EOL'
-
-  # 2. Generate the Better Auth schema into migrations/current.sql
-  #    (needs the database running — the pg adapter introspects it)
-  pnpm auth:generate
-
-  # 3. Make it re-runnable: graphile-migrate re-executes current.sql on every
-  #    change and again at commit, and plain `create table` fails the second time
-  perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
-
-  # 4. Apply the migration, then generate Kysely types from the database
-  pnpm db:watch --once
-  pnpm db:codegen
-
-  # 5. Freeze the auth schema as migration 000001, then start the dev server
-  pnpm db:commit
-  pnpm dev
-EOL
-elif [[ "$PROVIDER" == prisma ]]; then
-  cat <<'EOL'
-
-  # 2. Add the Better Auth tables to prisma/schema.prisma
-  #    (needs the database running — the CLI checks the schema against it)
-  pnpm auth:generate
-
-  # 3. Create the database and apply the migration
-  pnpm db:migrate
-
-  # 4. Start the dev server
-  pnpm dev
-EOL
-else
-  cat <<'EOL'
-
-  # 2. Generate the Better Auth drizzle schema into lib/auth-schema.ts
-  pnpm auth:generate
-
-  # 3. Generate and apply the migration
-  pnpm db:generate
-  pnpm db:migrate
-
-  # 4. Start the dev server
-  pnpm dev
-EOL
 fi
 
 cat <<'EOL'
