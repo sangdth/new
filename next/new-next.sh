@@ -8,12 +8,14 @@ set -euo pipefail
 
 # --- Defaults ---------------------------------------------------------------
 
-VERSION="6.0.0"
+VERSION="6.1.0"
 APP_NAME=""
 DRY_RUN=false
 NO_AI=false
 SETUP=false
 AUTH_SAAS=false
+# Short form of the --auth-saas plugin set, for help and status text.
+SAAS_PLUGINS="orgs with teams, admin, org-owned API keys, 2FA, multi-session"
 STEP_NUM=0
 
 # Four choices shape the project. Each comes from its flag, else the config
@@ -74,8 +76,8 @@ Flags (each overrides the config file for this run only):
   --linter <name>           biome or eslint
   --shadcn-preset <code>    shadcn preset code from the theme builder
 
-  --auth-saas               SaaS auth: organizations with teams, admin, org-owned
-                            API keys, two-factor and multi-session (no anonymous)
+  --auth-saas               SaaS auth plugins, no anonymous users:
+                            $SAAS_PLUGINS
   --setup                   Ask the questions again and rewrite the config file
   --no-ai                   Skip the AI step that writes the auth code
   --dry-run                 Print what would be executed without running anything
@@ -177,10 +179,21 @@ check_choice() {
   esac
 }
 
+# New name of a renamed config key / flag (without `--`); empty when not renamed.
+renamed_key() {
+  case "$1" in
+    provider) echo orm ;;
+    ai) echo ai-client ;;
+    preset) echo shadcn-preset ;;
+  esac
+}
+
 # Flat `key: value` lines; `#` starts a comment. Returns 1 when there is no file.
+# Old key names stop the run, unless $1 is `accept-renamed` (--setup): then they
+# are read under the new name, so the rewrite saves the new keys.
 load_config() {
   [[ -f "$CONFIG_FILE" ]] || return 1
-  local line key value n=0
+  local line key value renamed n=0
   local re='^[[:space:]]*([a-z-]+)[[:space:]]*:[[:space:]]*(.*)$'
   while IFS= read -r line || [[ -n "$line" ]]; do
     n=$((n + 1))
@@ -188,11 +201,12 @@ load_config() {
     [[ -z "${line//[[:space:]]/}" ]] && continue
     [[ "$line" =~ $re ]] || die "$CONFIG_FILE:$n: expected 'key: value'"
     key="${BASH_REMATCH[1]}"
-    case "$key" in
-      provider) die "$CONFIG_FILE:$n: 'provider' was renamed to 'orm'; edit the file or run $PROG --setup" ;;
-      ai) die "$CONFIG_FILE:$n: 'ai' was renamed to 'ai-client'; edit the file or run $PROG --setup" ;;
-      preset) die "$CONFIG_FILE:$n: 'preset' was renamed to 'shadcn-preset'; edit the file or run $PROG --setup" ;;
-    esac
+    renamed="$(renamed_key "$key")"
+    if [[ -n "$renamed" ]]; then
+      [[ "${1:-}" == accept-renamed ]] \
+        || die "$CONFIG_FILE:$n: '$key' was renamed to '$renamed'; edit the file or run $PROG --setup"
+      key="$renamed"
+    fi
     value="$(echo "${BASH_REMATCH[2]}" | tr -d "[:space:]\"'")"
     check_choice "$key" "$value" "$CONFIG_FILE:$n"
     case "$key" in
@@ -259,7 +273,7 @@ EOL
 resolve_choices() {
   if $SETUP; then
     [[ -t 0 ]] || die "--setup needs a terminal to ask the questions"
-    load_config || true
+    load_config accept-renamed || true
     ask_config
     write_config
   elif ! load_config; then
@@ -279,7 +293,7 @@ resolve_choices() {
   AI_MODEL="${AI_MODEL:-$(default_model "$AI_CLIENT")}"
   echo "Using: orm $ORM, ai-client $AI_CLIENT, linter $LINTER, shadcn-preset $SHADCN_PRESET"
   if $AUTH_SAAS; then
-    echo "Auth: SaaS (organizations, teams, admin, API keys, two-factor, multi-session)"
+    echo "Auth: SaaS ($SAAS_PLUGINS)"
   fi
 }
 
@@ -306,7 +320,6 @@ fetch("https://nodejs.org/dist/index.json")
 check_prereqs() {
   command -v node >/dev/null 2>&1 || die "node not found"
   command -v pnpm >/dev/null 2>&1 || die "pnpm not found (npm i -g pnpm)"
-  command -v docker >/dev/null 2>&1 || warn "docker not found; you'll need it for the post-setup steps"
 
   resolve_toolchain
 
@@ -318,6 +331,31 @@ check_prereqs() {
       NO_AI=true
     fi
   fi
+
+  # The scaffold runs Postgres to create the auth schema, which needs the
+  # auth.ts the AI step writes; --no-ai leaves both to the user.
+  if $NO_AI; then
+    command -v docker >/dev/null 2>&1 || warn "docker not found; you'll need it for the post-setup steps"
+  elif ! $DRY_RUN; then
+    check_docker
+  fi
+}
+
+# Fail before scaffolding if the database can't start: no daemon, port 5432
+# taken, or a container or volume left by an earlier project of this name
+# (an old volume would skip the init script and hold a stale schema).
+check_docker() {
+  docker info >/dev/null 2>&1 \
+    || die "Docker is not running. Start it, or pass --no-ai to scaffold without the database"
+  if command -v lsof >/dev/null 2>&1; then
+    local holder
+    # lsof exits 1 when nothing listens, which pipefail would turn into a failure.
+    holder="$(lsof +c 0 -nP -iTCP:5432 -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 { print $1 " (pid " $2 ")" }' || true)"
+    [[ -z "$holder" ]] || die "port 5432 is in use by $holder; stop that Postgres first"
+  fi
+  local label="label=com.docker.compose.project=$APP_NAME" left
+  left="$(docker ps -aq --filter "$label")$(docker volume ls -q --filter "$label")"
+  [[ -z "$left" ]] || die "Docker already has containers or volumes for a project named '$APP_NAME'. Remove them with: docker compose -p $APP_NAME down --volumes"
 }
 
 step_create_app() {
@@ -392,7 +430,7 @@ step_init_shadcn() {
 
 step_create_dirs() {
   step "Create directories"
-  local dirs=(docker lib)
+  local dirs=(docker/postgres-init lib scripts)
   case "$ORM" in
     kysely) dirs+=(migrations/committed) ;;
     prisma) dirs+=(prisma) ;;
@@ -402,20 +440,31 @@ step_create_dirs() {
 
 step_generate_docker_compose() {
   step "Generate docker/compose.dev.yml"
+  # pgvector ships the extension but does not turn it on. Init scripts run once,
+  # on the first boot of an empty volume; template1 gets it too, so every
+  # database created later (graphile shadow, Prisma shadow) has it.
+  run_write docker/postgres-init/001-vector.sql <<'EOL'
+create extension if not exists vector;
+\connect template1
+create extension if not exists vector;
+EOL
+
   # Compose prefixes volume names with the project name, so they stay short.
+  # Relative paths resolve from docker/, where this file lives.
   run_write docker/compose.dev.yml <<EOL
 name: $APP_NAME
 
 services:
   postgres:
     container_name: $APP_NAME-postgres
-    image: postgres:18-alpine
+    image: pgvector/pgvector:pg18-trixie
     restart: unless-stopped
     ports:
       - "5432:5432"
     volumes:
       # Postgres 18+ stores data in a versioned subdir; mount the parent directory.
       - postgres-data:/var/lib/postgresql
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -455,6 +504,73 @@ volumes:
   postgres-data:
   redis-data:
 EOL
+}
+
+step_generate_dev_script() {
+  step "Generate scripts/dev.sh"
+  local migrate
+  case "$ORM" in
+    kysely) migrate="graphile-migrate migrate" ;;
+    prisma) migrate="prisma migrate deploy" ;;
+    drizzle) migrate="drizzle-kit migrate" ;;
+  esac
+  {
+    cat <<'EOL'
+#!/usr/bin/env sh
+# `pnpm dev`: boots the dev containers (Postgres, Redis, Mailpit), applies
+# committed migrations, then runs `next dev` in the foreground, its output
+# copied to logs/terminal.log. A plain `compose up -d && next dev` leaves the
+# containers running after Ctrl-C with nothing to stop them; the trap below is
+# the whole reason this is a file rather than a one-liner.
+set -eu
+set -o pipefail
+
+# Run from the project root whatever the caller's cwd, and put the project's
+# binaries first so a bare `next` is this project's.
+cd "$(dirname "$0")/.."
+PATH="$PWD/node_modules/.bin:$PATH"
+export PATH
+
+if [ ! -f .env ]; then
+	echo "scripts/dev.sh: .env is missing. Create it with POSTGRES_PASSWORD and DATABASE_URL." >&2
+	exit 1
+fi
+
+COMPOSE="docker compose -f docker/compose.dev.yml --env-file .env"
+
+# Containers that were already up belong to whoever started them (another
+# `pnpm dev`, `pnpm docker`): this run leaves them running when it exits.
+ALREADY_UP=$($COMPOSE ps --status running --quiet)
+
+# `stop`, not `down`: the containers stay, so the next boot is seconds. INT and
+# TERM are trapped explicitly, since a shell killed by an untrapped signal need
+# not run its EXIT trap; EXIT also tears down after a failed migrate.
+cleanup() {
+	# Once: an INT that interrupts `next dev` would otherwise run this from the
+	# INT trap and again from the EXIT trap `set -e` fires straight after.
+	trap - INT TERM EXIT
+	if [ -z "$ALREADY_UP" ]; then
+		$COMPOSE stop
+	fi
+}
+trap cleanup INT TERM EXIT
+
+$COMPOSE up -d --wait postgres redis mailpit
+EOL
+    echo "$migrate"
+    cat <<'EOL'
+
+# Copied to logs/terminal.log so an agent can read the server's output. `tee -i`
+# ignores Ctrl-C so it keeps writing Next's shutdown lines; pipefail passes on
+# next's exit status. Each run starts the log fresh.
+mkdir -p logs
+next dev "$@" 2>&1 | tee -i logs/terminal.log
+EOL
+  } | run_write scripts/dev.sh
+  run_cmd chmod +x scripts/dev.sh
+  if ! $DRY_RUN; then
+    grep -qx '/logs' .gitignore 2>/dev/null || printf '\n# scripts/dev.sh output\n/logs\n' >> .gitignore
+  fi
 }
 
 step_generate_env() {
@@ -714,6 +830,7 @@ step_add_package_scripts() {
       ;;
   esac
   run_cmd npm pkg set \
+    "scripts.dev=sh scripts/dev.sh" \
     "scripts.typecheck=next typegen && tsc --noEmit" \
     "${db_scripts[@]}" \
     "scripts.docker=$compose up -d --wait" \
@@ -792,6 +909,81 @@ step_snapshot() {
   git commit -q -m "chore: scaffold installs and config" || warn "snapshot commit failed; continuing"
 }
 
+# Starts Postgres for the rest of the scaffold and stops every container of the
+# project when the script exits, however it exits. The volume keeps the data.
+step_start_postgres() {
+  step "Start Postgres"
+  COMPOSE=(docker compose -f "$PWD/docker/compose.dev.yml" --env-file "$PWD/.env")
+  if $DRY_RUN; then
+    echo "  > docker compose up -d --wait postgres (stopped again on exit)"
+    return
+  fi
+  trap stop_containers EXIT
+  trap 'stop_containers; exit 130' INT TERM
+  "${COMPOSE[@]}" up -d --wait postgres || die "Postgres did not start; see: cd $APP_NAME && pnpm docker:logs"
+}
+
+stop_containers() {
+  trap - INT TERM EXIT
+  echo "Stopping the dev containers"
+  "${COMPOSE[@]}" stop >/dev/null 2>&1 || warn "could not stop the containers; run: cd $APP_NAME && pnpm docker:stop"
+}
+
+# Better Auth table names for the configured plugins, lowercased with no
+# underscores, so the check matches every ORM's naming (teamMember, team_member).
+expected_auth_tables() {
+  echo "user session account verification apikey"
+  if $AUTH_SAAS; then
+    echo "organization member invitation team teammember twofactor"
+  fi
+}
+
+# The flow the --no-ai next steps print, run against the live database.
+step_init_database() {
+  step "Create the auth schema and apply it ($ORM)"
+  run_cmd pnpm auth:generate || die "pnpm auth:generate failed"
+  case "$ORM" in
+    kysely)
+      # graphile-migrate re-executes current.sql on every change and again at
+      # commit, and the CLI's plain `create table` fails the second time.
+      run_cmd perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
+      run_cmd pnpm db:watch --once || die "pnpm db:watch --once failed"
+      run_cmd pnpm db:codegen || die "pnpm db:codegen failed"
+      run_cmd pnpm db:commit || die "pnpm db:commit failed"
+      ;;
+    prisma)
+      run_cmd pnpm db:migrate || die "pnpm db:migrate failed"
+      run_cmd pnpm db:generate || die "pnpm db:generate failed"
+      ;;
+    drizzle)
+      run_cmd pnpm db:generate || die "pnpm db:generate failed"
+      run_cmd pnpm db:migrate || die "pnpm db:migrate failed"
+      ;;
+  esac
+  $DRY_RUN && return
+
+  # The Better Auth CLI lags the runtime; a plugin it doesn't know yet leaves
+  # its table out without an error.
+  local tables missing="" table
+  tables=" $("${COMPOSE[@]}" exec -T postgres psql -U postgres -d postgres -Atc \
+    "select lower(replace(tablename, '_', '')) from pg_tables where schemaname = 'public'" | tr '\n' ' ') "
+  for table in $(expected_auth_tables); do
+    [[ "$tables" == *" $table "* ]] || missing="$missing $table"
+  done
+  [[ -z "$missing" ]] || die "auth tables missing after auth:generate:$missing. The Better Auth CLI is behind the runtime; try @better-auth/cli@beta in the auth:generate script"
+}
+
+# The DB step writes generated files (Kysely types, the drizzle schema); they
+# get the same format and type pass as the rest. verify already built the app.
+step_final_check() {
+  step "Check the generated files: typecheck, lint"
+  if [[ "$LINTER" == biome ]]; then
+    run_cmd pnpm exec biome check --write || true
+  fi
+  run_cmd pnpm typecheck || die "pnpm typecheck failed after the database step"
+  run_cmd pnpm lint || die "pnpm lint failed after the database step"
+}
+
 # Intent, not code: the model reads the installed packages to decide how.
 ai_prompt() {
   cat <<'EOL'
@@ -809,6 +1001,7 @@ points at the docs bundled with the installed Next.js.
 
 1. `auth.ts` at the project root (the route handler imports it as `@/auth`): a
    Better Auth server instance with
+   - email and password sign-in enabled, with automatic sign-in after sign-up
 EOL
   case "$ORM" in
     kysely)
@@ -837,9 +1030,6 @@ EOL
 EOL
       ;;
   esac
-  cat <<'EOL'
-   - email and password sign-in enabled, with automatic sign-in after sign-up
-EOL
   if $AUTH_SAAS; then
     cat <<'EOL'
    - plugins for a multi-tenant SaaS:
@@ -1062,19 +1252,80 @@ $(tail -n 80 "$log")
   rm -f "$log"
 }
 
+# Next steps for --no-ai: the scaffold can't create the auth schema itself,
+# since auth.ts is still to be written.
+print_manual_steps() {
+  cat <<EOF
+
+Done! Next steps:
+
+  cd $APP_NAME
+
+  # 1. Start Postgres, Redis, and Mailpit (waits until healthy)
+  pnpm docker
+EOF
+
+  if [[ "$ORM" == kysely ]]; then
+    cat <<'EOL'
+
+  # 2. Generate the Better Auth schema into migrations/current.sql
+  #    (needs the database running — the pg adapter introspects it)
+  pnpm auth:generate
+
+  # 3. Make it re-runnable: graphile-migrate re-executes current.sql on every
+  #    change and again at commit, and plain `create table` fails the second time
+  perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
+
+  # 4. Apply the migration, then generate Kysely types from the database
+  pnpm db:watch --once
+  pnpm db:codegen
+
+  # 5. Freeze the auth schema as migration 000001, then start the dev server
+  pnpm db:commit
+  pnpm dev
+EOL
+  elif [[ "$ORM" == prisma ]]; then
+    cat <<'EOL'
+
+  # 2. Add the Better Auth tables to prisma/schema.prisma
+  #    (needs the database running — the CLI checks the schema against it)
+  pnpm auth:generate
+
+  # 3. Create the database and apply the migration
+  pnpm db:migrate
+
+  # 4. Start the dev server
+  pnpm dev
+EOL
+  else
+    cat <<'EOL'
+
+  # 2. Generate the Better Auth drizzle schema into lib/auth-schema.ts
+  pnpm auth:generate
+
+  # 3. Generate and apply the migration
+  pnpm db:generate
+  pnpm db:migrate
+
+  # 4. Start the dev server
+  pnpm dev
+EOL
+  fi
+
+  if $AUTH_SAAS; then
+    cat <<'EOL'
+
+  auth:generate should also create organization, member, invitation, team,
+  teamMember and twoFactor. If one is missing, the Better Auth CLI is behind the
+  runtime; retry with @better-auth/cli@beta in the auth:generate script.
+EOL
+  fi
+}
+
 # --- Parse arguments --------------------------------------------------------
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --provider | --provider=* | --ai | --ai=* | --preset | --preset=*)
-      new="${1%%=*}"
-      case "$new" in
-        --provider) new=--orm ;;
-        --ai) new=--ai-client ;;
-        --preset) new=--shadcn-preset ;;
-      esac
-      die "${1%%=*} was renamed to $new"
-      ;;
     --orm | --ai-client | --linter | --shadcn-preset)
       [[ -n "${2:-}" && "${2:-}" != --* ]] || die "$1 needs a value"
       set -- "$1=$2" "${@:3}"
@@ -1123,6 +1374,9 @@ while [[ $# -gt 0 ]]; do
       print_usage
       ;;
     --*)
+      flag="${1%%=*}"
+      renamed="$(renamed_key "${flag#--}")"
+      [[ -z "$renamed" ]] || die "$flag was renamed to --$renamed"
       die "Unknown flag: $1"
       ;;
     *)
@@ -1158,6 +1412,7 @@ step_init_shadcn
 step_create_dirs
 step_generate_env
 step_generate_docker_compose
+step_generate_dev_script
 step_generate_db_files
 if [[ "$LINTER" == biome ]]; then
   step_configure_biome
@@ -1171,10 +1426,7 @@ Skipped the AI step (--no-ai). Still to write by hand:
   auth.ts, lib/auth-client.ts, app/api/auth/[...all]/route.ts
 EOF
   if $AUTH_SAAS; then
-    cat <<EOF
-  with the SaaS plugins: organization (teams on), admin, API key owned by the
-  organization, two-factor and multi-session.
-EOF
+    echo "  with the SaaS plugins: $SAAS_PLUGINS"
   fi
   if [[ "$LINTER" == eslint ]]; then
     cat <<EOF
@@ -1182,75 +1434,21 @@ EOF
   fails until then).
 EOF
   fi
+  print_manual_steps
 else
+  step_start_postgres
   step_wire_auth "$(ai_prompt)"
   step_verify
-fi
+  step_init_database
+  step_final_check
+  $DRY_RUN || stop_containers
+  cat <<EOF
 
-cat <<EOF
-
-Done! Next steps:
+Done! The auth schema is migrated ($ORM) and the containers are stopped.
 
   cd $APP_NAME
-
-  # 1. Start Postgres, Redis, and Mailpit (waits until healthy)
-  pnpm docker
+  pnpm dev    # starts Postgres, Redis and Mailpit, applies migrations, runs next dev
 EOF
-
-if [[ "$ORM" == kysely ]]; then
-  cat <<'EOL'
-
-  # 2. Generate the Better Auth schema into migrations/current.sql
-  #    (needs the database running — the pg adapter introspects it)
-  pnpm auth:generate
-
-  # 3. Make it re-runnable: graphile-migrate re-executes current.sql on every
-  #    change and again at commit, and plain `create table` fails the second time
-  perl -i -pe 's/^create ((?:unique )?index|table) /create $1 if not exists /' migrations/current.sql
-
-  # 4. Apply the migration, then generate Kysely types from the database
-  pnpm db:watch --once
-  pnpm db:codegen
-
-  # 5. Freeze the auth schema as migration 000001, then start the dev server
-  pnpm db:commit
-  pnpm dev
-EOL
-elif [[ "$ORM" == prisma ]]; then
-  cat <<'EOL'
-
-  # 2. Add the Better Auth tables to prisma/schema.prisma
-  #    (needs the database running — the CLI checks the schema against it)
-  pnpm auth:generate
-
-  # 3. Create the database and apply the migration
-  pnpm db:migrate
-
-  # 4. Start the dev server
-  pnpm dev
-EOL
-else
-  cat <<'EOL'
-
-  # 2. Generate the Better Auth drizzle schema into lib/auth-schema.ts
-  pnpm auth:generate
-
-  # 3. Generate and apply the migration
-  pnpm db:generate
-  pnpm db:migrate
-
-  # 4. Start the dev server
-  pnpm dev
-EOL
-fi
-
-if $AUTH_SAAS; then
-  cat <<'EOL'
-
-  auth:generate should also create organization, member, invitation, team,
-  teamMember and twoFactor. If one is missing, the Better Auth CLI is behind the
-  runtime; retry with @better-auth/cli@beta in the auth:generate script.
-EOL
 fi
 
 cat <<'EOL'

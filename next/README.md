@@ -1,6 +1,6 @@
 # new-next.sh — Next.js Scaffolding Script
 
-Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Better Auth, the Vercel AI SDK, and Jotai — plus a local Docker stack (Postgres, Redis, Mailpit). Four choices shape the project — ORM (Kysely + graphile-migrate, Prisma or Drizzle), the AI client that writes the auth code (opencode, Claude Code or Codex), linter (Biome or ESLint) and shadcn preset — and are saved once in a [config file](#config-file). `--auth-saas` swaps the default auth plugins for a multi-tenant SaaS set.
+Scaffolds a Next.js project with App Router, TypeScript, Tailwind, shadcn/ui, Better Auth, the Vercel AI SDK, and Jotai — plus a local Docker stack (Postgres with pgvector, Redis, Mailpit) that the scaffold starts itself to create and migrate the auth schema. Four choices shape the project — ORM (Kysely + graphile-migrate, Prisma or Drizzle), the AI client that writes the auth code (opencode, Claude Code or Codex), linter (Biome or ESLint) and shadcn preset — and are saved once in a [config file](#config-file). `--auth-saas` swaps the default auth plugins for a multi-tenant SaaS set.
 
 > Installation and symlink setup live in the [root README](../README.md#installation).
 
@@ -15,6 +15,11 @@ nnx --setup                        # answer the config questions again
 The script creates the project as a subdirectory of your **current working
 directory**, not of the repo — so `cd` to wherever you want the project to live
 first. Help and version output adapt to the name you invoked it under.
+
+Docker must be running and port 5432 free: the scaffold starts Postgres to
+create the auth schema, and stops the containers when it exits. `--no-ai` skips
+that (there is no `auth.ts` to read the schema from) and prints the steps to run
+by hand instead.
 
 ### Config file
 
@@ -38,8 +43,7 @@ shadcn-preset: b0       # shadcn preset code
 
 Each value is picked as: flag, else config file, else built-in default. Flags
 apply to one run and never change the file. A bad value or unknown key stops the
-script with the file and line number. The keys `provider`, `ai` and `preset`
-stop it with the new name to use (`orm`, `ai-client`, `shadcn-preset`).
+script with the file and line number.
 
 ### Flags
 
@@ -56,8 +60,9 @@ stop it with the new name to use (`orm`, `ai-client`, `shadcn-preset`).
 | `-v`, `--version`        | Show version                                        |
 | `--help`                 | Show help message                                   |
 
-`--auth-saas` is a switch for one run, not a config key. The old flags
-`--provider`, `--ai` and `--preset` stop the script with the new name.
+`--auth-saas` is a switch for one run, not a config key. The old names
+(`--provider`/`provider`, `--ai`/`ai`, `--preset`/`preset`) stop the script with
+the new one; `--setup` reads old config keys as defaults and saves the new ones.
 
 | Env var          | Default       | Purpose                             |
 | ---------------- | ------------- | ----------------------------------- |
@@ -187,8 +192,7 @@ pg                    # PostgreSQL client
 > plugin.
 >
 > `--auth-saas` installs nothing extra: organization, two-factor and
-> multi-session ship inside `better-auth`. The script owns every install; the AI
-> step only writes files.
+> multi-session ship inside `better-auth`.
 
 ### Step 3: Initializes shadcn/ui
 
@@ -201,8 +205,9 @@ pg                    # PostgreSQL client
 
 Creates necessary directories:
 
-- `docker/`
+- `docker/postgres-init/`
 - `lib/`
+- `scripts/`
 - `migrations/committed/` (kysely) or `prisma/` (prisma)
 
 ### Step 5: Configures Environment Variables
@@ -215,6 +220,18 @@ Creates `.env` with:
   the Postgres container listens on IPv4 only)
 - `SHADOW_DATABASE_URL` and `ROOT_DATABASE_URL` for graphile-migrate (kysely only)
 - SMTP settings for Mailpit (local email testing)
+
+### Step 5b: Generates the Docker Stack and `scripts/dev.sh`
+
+- `docker/compose.dev.yml`: Postgres (`pgvector/pgvector:pg18-trixie`, data
+  volume at `/var/lib/postgresql` for Postgres 18's versioned data directory),
+  Redis and Mailpit
+- `docker/postgres-init/001-vector.sql`: runs on the first boot of an empty
+  volume and creates the `vector` extension in `postgres` and `template1`, so
+  databases created later (shadow databases) have it too
+- `scripts/dev.sh`, run by `pnpm dev`: starts the containers, applies committed
+  migrations, runs `next dev` with its output copied to `logs/terminal.log`, and
+  stops the containers on Ctrl-C (unless they were already running)
 
 ### Step 6: Configures the Database (depends on `--orm`)
 
@@ -256,6 +273,7 @@ Adds via `npm pkg set`. This runs right after `create-next-app`, before the pin
 in Step 1b, because npm refuses to edit the file once `devEngines.runtime` names
 a Node it isn't running on.
 
+- `dev` (`sh scripts/dev.sh`)
 - `typecheck` (`next typegen && tsc --noEmit`; `next typegen` writes the
   `LayoutProps`/`PageProps` route types into the gitignored `.next/`)
 - `db:*` scripts for the chosen ORM: `db:watch` / `db:migrate` / `db:commit` /
@@ -296,9 +314,8 @@ It writes:
 
 - `auth.ts`: Better Auth on the ORM's adapter, email/password with auto
   sign-in, admin (Better Auth's default `user`/`admin` roles), API key and
-  anonymous plugins. With `--auth-saas`: organization (teams on, invite links
-  logged to the console), admin, API keys owned by the organization, two-factor
-  and multi-session, and no anonymous
+  anonymous plugins. With `--auth-saas`, the SaaS set instead (see
+  [Authentication](#authentication)); invite links are logged to the console
 - `lib/auth-client.ts`: React client with matching plugins and exported hooks
   (plus the active-organization hook under `--auth-saas`)
 - `app/api/auth/[...all]/route.ts`: the route handler
@@ -332,12 +349,42 @@ If any check fails, the AI CLI gets **one** more run with the failing output
 appended to the prompt, then the checks run again. A second failure exits
 non-zero; review what the model changed with `git diff`.
 
-> Neither the Better Auth schema nor the Kysely types are generated at scaffold time — both need a **live database** (the Better Auth `pg` adapter introspects the DB to diff the schema, and `kysely-codegen` reads it). They run as post-setup steps once Postgres is up (`pnpm auth:generate`, then `pnpm db:codegen`).
+### Step 12: Creates the Auth Schema
+
+Postgres was started just before Step 10, because the Better Auth CLI and
+`kysely-codegen` both need a **live database**. Once the auth files pass, the
+script runs, by ORM:
+
+- **kysely**: `pnpm auth:generate` → the `perl` rewrite that makes
+  `migrations/current.sql` re-runnable (graphile-migrate runs it again at commit,
+  and a plain `create table` fails the second time with `42P07`) →
+  `pnpm db:watch --once` → `pnpm db:codegen` → `pnpm db:commit` (the auth schema
+  becomes `migrations/committed/000001.sql`)
+- **prisma**: `pnpm auth:generate` → `pnpm db:migrate` → `pnpm db:generate`
+- **drizzle**: `pnpm auth:generate` → `pnpm db:generate` → `pnpm db:migrate`
+
+It then checks the database for a table per configured plugin (`user`,
+`session`, `account`, `verification`, `apikey`, plus `organization`, `member`,
+`invitation`, `team`, `teamMember` and `twoFactor` under `--auth-saas`). A
+missing one means the Better Auth CLI is behind the runtime; the script stops
+and suggests `@better-auth/cli@beta`. Last, it formats the generated files and
+runs `pnpm typecheck && pnpm lint`, then stops the containers.
 
 ## Post-Setup Steps
 
-The script prints the exact sequence for the ORM it scaffolded. After the
-script completes:
+The auth schema is already migrated, so:
+
+```bash
+cd <app-name>
+pnpm dev
+```
+
+Add an OpenAI API key to `.env` if you use the AI features.
+
+### With `--no-ai`
+
+The script prints the exact sequence for the ORM it scaffolded, to run once you
+have written the auth files:
 
 1. **Start the local services** (Postgres, Redis, Mailpit). This blocks until healthy
 
@@ -375,14 +422,7 @@ Under `--auth-saas`, `auth:generate` also writes `organization`, `member`,
 Better Auth CLI is behind the runtime; use `@better-auth/cli@beta` in the
 `auth:generate` script.
 
-6. **Update environment variables** (if needed)
-   - Add an OpenAI API key if using AI features
-   - Update database credentials if not using the defaults
-
-7. **Start the development server**
-   ```bash
-   pnpm dev
-   ```
+Then `pnpm dev`.
 
 ## Feature List
 
@@ -404,6 +444,8 @@ After running the script, your project includes:
 ### Database & Migrations (chosen with `--orm`)
 
 Default, **kysely**:
+
+Every ORM runs on **Postgres 18 with pgvector**, the `vector` extension already created.
 
 - ✅ **Kysely** - Type-safe SQL query builder
 - ✅ **PostgreSQL** - Database client (pg)
@@ -456,6 +498,7 @@ Default, **kysely**:
 
 ### Developer Tools
 
+- ✅ **`pnpm dev`** - `scripts/dev.sh` starts the containers, migrates, runs Next, stops them on Ctrl-C
 - ✅ **concurrently** - Run multiple scripts
 - ✅ **rimraf** - Cross-platform file deletion
 - ✅ Pre-configured environment variables
@@ -471,7 +514,11 @@ Default, **kysely**:
 │           └── [...all]/
 │               └── route.ts       # Auth API handler
 ├── docker/
-│   └── compose.dev.yml            # Docker Compose (Postgres, Redis, Mailpit)
+│   ├── compose.dev.yml            # Docker Compose (Postgres + pgvector, Redis, Mailpit)
+│   └── postgres-init/
+│       └── 001-vector.sql         # create extension vector, on first boot
+├── scripts/
+│   └── dev.sh                     # pnpm dev: containers, migrate, next dev
 ├── lib/
 │   ├── db.ts                      # Kysely client (drizzle: db client)
 │   ├── db-types.ts                # Generated Kysely types (kysely-codegen)
@@ -481,6 +528,7 @@ Default, **kysely**:
 │   └── committed/                 # Committed migrations
 ├── auth.ts                        # Auth server config (pg Pool / adapter)
 ├── .gmrc.js                       # graphile-migrate config
+├── logs/terminal.log              # next dev output (gitignored)
 ├── .nvmrc                         # Node version (same as devEngines.runtime)
 └── .env                           # Environment variables
 
@@ -519,7 +567,18 @@ To modify the default setup, edit the script:
 - **`pnpm lint` fails on formatting after `shadcn add`** (Biome): new components
   arrive unformatted. Run `pnpm format`
 - **shadcn init fails**: Ensure you have a compatible Node.js version
-- **`pnpm db:codegen` fails**: Ensure Postgres is running and migrations are applied (`docker compose ... up -d`, then `pnpm db:watch --once`); `kysely-codegen` needs a live database
+- **`pnpm db:codegen` fails**: Ensure Postgres is running and migrations are applied (`pnpm docker`, then `pnpm db:watch --once`); `kysely-codegen` needs a live database
+- **`port 5432 is in use by ...`**: another Postgres (often another project's
+  container) holds the port. Stop it (`pnpm docker:stop` in that project) and
+  rerun
+- **`mounts denied: The path .../docker/postgres-init is not shared`**: Docker
+  Desktop only mounts folders listed under Settings → Resources → File Sharing.
+  `/Users` is there by default; `/tmp` is not. Scaffold under your home folder,
+  or add the path
+- **`Docker already has containers or volumes for a project named ...`**: an
+  earlier project of the same name left them behind. Its volume would skip the
+  init script and keep the old schema, so the scaffold stops. Remove them with
+  the `docker compose -p <name> down --volumes` it prints
 - **Prisma: `P1001 Can't reach database server`**: the generated `.env` uses `127.0.0.1`, not `localhost`; Prisma's engine resolves `localhost` to `::1` first and the Postgres container publishes IPv4 only. If you switch hosts and hit this, keep the address
 - **Prisma: the CLI installs an 8.0.0 RC**: the `prisma` package's `latest` dist-tag points at a release candidate while `@prisma/client`'s is still 7.x. The scaffold pins `prisma@^7`; a mismatched CLI and client cannot work
 - **Prisma: `prisma migrate dev` hangs**: it prompts for a migration name when stdin is not a TTY. `pnpm db:migrate` passes `--name init` for that reason
