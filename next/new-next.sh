@@ -6,6 +6,10 @@
 
 set -euo pipefail
 
+# When Corepack's pnpm shim comes first on PATH, it asks before downloading the
+# pnpm pinned in devEngines; answer yes so the scaffold runs unattended.
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
 # --- Defaults ---------------------------------------------------------------
 
 VERSION="6.1.0"

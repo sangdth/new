@@ -128,7 +128,9 @@ Only `create-next-app` itself runs on your global versions, which is why it skip
 its install: a lockfile resolved by an older pnpm fails a newer one's checks.
 
 The step also removes the `packageManager` field `create-next-app` writes
-(Corepack would follow it instead of `devEngines`) and rewrites
+(Corepack would follow it instead of `devEngines`; the script sets
+`COREPACK_ENABLE_DOWNLOAD_PROMPT=0` so a Corepack `pnpm` shim downloads the
+pinned pnpm without asking) and rewrites
 `pnpm-workspace.yaml` in pnpm 11+'s format. pnpm 11+ fails the install on any
 dependency build script it hasn't been told to allow or deny in `allowBuilds`,
 and skips releases younger than a day (`minimumReleaseAge`). The same Node version
